@@ -8,15 +8,6 @@ PyLungViewer - Просмотрщик и анализатор КТ снимко�
 
 import sys
 import os
-
-# --- Add these lines ---
-print(f"--- Running with Python: {sys.executable}")
-print(f"--- sys.path ---")
-for p in sys.path:
-    print(p)
-print(f"--------------")
-# ---------------------
-
 import logging
 
 from PyQt5.QtWidgets import QApplication

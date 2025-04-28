@@ -3,6 +3,7 @@
 
 """
 Модуль для сегментации легких с использованием обученной модели PyTorch.
+(Версия с сегментацией всего объема)
 """
 
 import logging
@@ -13,6 +14,7 @@ import numpy as np
 import cv2
 # Убрали skimage, так как cv2.resize достаточно
 # from skimage.transform import resize
+from PyQt5.QtCore import QObject, pyqtSignal # Добавлено для сигналов прогресса
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +28,11 @@ ENCODER_WEIGHTS = None # Веса не нужны для загрузки state_
 CLASSES = 1
 ACTIVATION = None # Модель выдает логиты
 
+# --- Класс-сигнальщик для передачи прогресса из predict_volume ---
+class SegmentationSignals(QObject):
+    progress = pyqtSignal(int, int) # current_slice, total_slices
+
+# --- Класс сегментатора ---
 class LungSegmenter:
     """Класс для выполнения сегментации легких."""
 
@@ -39,6 +46,7 @@ class LungSegmenter:
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self.model = None
         self.model_path = None
+        self.signals = SegmentationSignals() # Создаем экземпляр сигналов
         logger.info(f"Используемое устройство для сегментации: {self.device}")
         if model_path:
             self.load_model(model_path)
@@ -183,9 +191,69 @@ class LungSegmenter:
                 interpolation=cv2.INTER_NEAREST # Ближайший сосед для маски
             )
 
-            logger.info(f"Сегментация для среза выполнена. Размер маски: {mask_resized.shape}")
+            # Убрали лог отсюда, чтобы не засорять при обработке объема
+            # logger.info(f"Сегментация для среза выполнена. Размер маски: {mask_resized.shape}")
             return mask_resized
 
         except Exception as e:
-            logger.error(f"Ошибка во время предсказания: {e}", exc_info=True)
+            logger.error(f"Ошибка во время предсказания для одного среза: {e}", exc_info=True)
             return None
+
+    def predict_volume(self, volume_hu):
+        """
+        Выполнение предсказания (сегментации) для всего 3D объема КТ.
+
+        Args:
+            volume_hu (np.ndarray): 3D массив объема в единицах Хаунсфилда [Z, H, W].
+
+        Returns:
+            np.ndarray: 3D массив бинарных масок сегментации [Z, H, W]
+                        или None, если модель не загружена или произошла ошибка.
+        """
+        if self.model is None:
+            logger.error("Модель сегментации не загружена для обработки объема.")
+            return None
+        if volume_hu is None or volume_hu.ndim != 3:
+            logger.error("Некорректные входные данные для predict_volume.")
+            return None
+
+        num_slices, height, width = volume_hu.shape
+        logger.info(f"Начало сегментации объема из {num_slices} срезов...")
+
+        # Создаем пустой массив для хранения масок
+        volume_mask = np.zeros_like(volume_hu, dtype=np.uint8)
+        error_occurred = False
+
+        # Проверяем наличие атрибута signals перед использованием
+        signals_available = hasattr(self, 'signals') and self.signals is not None
+
+        for i in range(num_slices):
+            # Проверяем флаг отмены (если он есть у воркера, который вызывает этот метод)
+            # Это требует передачи ссылки на воркер или флага отмены сюда,
+            # пока оставим без явной проверки отмены внутри цикла.
+            # Если воркер будет отменен, он просто не сохранит результат.
+
+            slice_hu = volume_hu[i]
+            # Выполняем предсказание для текущего среза
+            mask = self.predict(slice_hu)
+
+            if mask is not None:
+                # Проверяем совпадение размеров на всякий случай
+                if mask.shape == (height, width):
+                    volume_mask[i] = mask
+                else:
+                    logger.warning(f"Размер маски ({mask.shape}) не совпадает с размером среза ({height}, {width}) для индекса {i}. Пропуск.")
+            else:
+                logger.warning(f"Не удалось сегментировать срез {i}. Маска будет пустой.")
+                error_occurred = True
+
+            # Отправляем сигнал о прогрессе, если signals доступен
+            if signals_available and ((i + 1) % 5 == 0 or i == num_slices - 1):
+                 self.signals.progress.emit(i + 1, num_slices)
+
+        if error_occurred:
+            logger.warning("Во время сегментации объема возникли ошибки для некоторых срезов.")
+
+        logger.info(f"Сегментация объема завершена. Возвращается массив масок формы {volume_mask.shape}")
+        return volume_mask
+
