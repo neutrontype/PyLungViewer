@@ -31,15 +31,16 @@ def setup_app_path():
     # Получение домашней директории пользователя
     home_dir = os.path.expanduser("~")
     app_dir = os.path.join(home_dir, ".pylungviewer")
-    
+
     # Создание директорий, если они не существуют
-    subdirs = ["config", "cache", "temp"]
+    # Добавляем 'models' в список создаваемых директорий
+    subdirs = ["config", "cache", "temp", "models"]
     for subdir in subdirs:
         dir_path = os.path.join(app_dir, subdir)
         if not os.path.exists(dir_path):
             os.makedirs(dir_path)
             logger.info(f"Создана директория: {dir_path}")
-    
+
     return app_dir
 
 
@@ -50,23 +51,29 @@ def main():
     app.setApplicationName("PyLungViewer")
     app.setOrganizationName("PyLungDev")
     app.setOrganizationDomain("pylungviewer.org")
-    
+
     # Настройка путей приложения
     app_dir = setup_app_path()
-    
+    # Определяем путь к папке моделей
+    models_dir = os.path.join(app_dir, "models")
+    # Здесь вы можете добавить логику для поиска конкретного файла модели,
+    # например, искать первый файл с расширением .pth или .pt в этой папке.
+    # Пока просто передаем путь к папке. Логика выбора файла будет в ViewerPanel.
+
     # Настройка параметров QSettings
     settings = QSettings(
-        os.path.join(app_dir, "config", "settings.ini"), 
+        os.path.join(app_dir, "config", "settings.ini"),
         QSettings.IniFormat
     )
-    
+
     # Импортируем здесь, чтобы избежать циклических импортов
     from pylungviewer.gui.main_window import MainWindow
-    
+
     # Создание и отображение главного окна приложения
-    main_window = MainWindow(settings)
+    # Передаем путь к папке моделей в главное окно
+    main_window = MainWindow(settings, models_dir=models_dir)
     main_window.show()
-    
+
     # Запуск цикла обработки событий
     return app.exec_()
 
