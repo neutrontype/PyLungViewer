@@ -397,3 +397,4 @@ class SidebarPanel(QWidget):
         selected_item = selected_items[0]
         logger.info(f"Показываем детали для: {selected_item.text(0).strip()} (не реализовано)")
         QMessageBox.information(self, "Детали", "Функция отображения деталей пока не реализована.")
+

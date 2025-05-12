@@ -3,7 +3,7 @@
 
 """
 Панель просмотра DICOM изображений для приложения PyLungViewer.
-(Версия с интеграцией сегментации + Сегментация всего объема - Исправлена активация чекбокса для одного среза)
+(Версия с интеграцией сегментации + Сегментация всего объема + Отображение HU при наведении мыши + Две линейки без нижней метки и единиц)
 """
 
 import logging
@@ -22,7 +22,7 @@ import pyqtgraph as pg
 # Для визуализации изображений
 import numpy as np
 import pydicom
-from pyqtgraph import ImageView, ImageItem
+from pyqtgraph import ImageView, ImageItem, AxisItem # Импортируем AxisItem
 
 # --- Определяем logger ДО блока try-except ---
 logger = logging.getLogger(__name__)
@@ -40,7 +40,6 @@ except ImportError as e:
     print("--------------------------------------------------")
     print("!!! Ошибка импорта модуля сегментации (viewer_panel.py) !!!")
     print(f"Ошибка: {e}")
-    print("Полный стек ошибки:")
     traceback.print_exc()
     print("--------------------------------------------------")
     logger.warning("Модуль сегментации (pylungviewer.core.segmentation) не найден или его зависимости отсутствуют.")
@@ -119,7 +118,7 @@ class SegmentationWorker(QObject):
 
 # --- Основной класс панели ---
 class ViewerPanel(QWidget):
-    """Панель просмотра DICOM изображений с поддержкой сегментации."""
+    """Панель просмотра DICOM изображений с поддержкой сегментации и отображением HU."""
 
     slice_changed = pyqtSignal(int)
     segmentation_progress = pyqtSignal(int, int)
@@ -155,7 +154,13 @@ class ViewerPanel(QWidget):
         self.touch_start_pos = None
         self._init_ui()
         self.installEventFilter(self)
-        logger.info("Панель просмотра инициализирована (с поддержкой сегментации)")
+
+        # Включаем отслеживание мыши на graphics_widget
+        self.graphics_widget.setMouseTracking(True)
+        # Подключаем сигнал sigMouseMoved от сцены к слоту _on_mouse_moved
+        self.graphics_widget.scene().sigMouseMoved.connect(self._on_mouse_moved)
+
+        logger.info("Панель просмотра инициализирована (с поддержкой сегментации и отображением HU)")
 
     def _init_ui(self):
         # ... (UI initialization code remains the same) ...
@@ -168,23 +173,65 @@ class ViewerPanel(QWidget):
         info_layout.setContentsMargins(5, 5, 5, 5)
         self.info_label = QLabel("Нет загруженных данных")
         info_layout.addWidget(self.info_label)
+
+        # --- Добавляем QLabel для отображения HU ---
+        self.hu_label = QLabel("HU: N/A")
+        self.hu_label.setMinimumWidth(100) # Обеспечиваем минимальную ширину
+        self.hu_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        info_layout.addWidget(self.hu_label)
+        # ------------------------------------------
+
         main_layout.addWidget(info_panel)
 
         self.graphics_widget = pg.GraphicsLayoutWidget()
         main_layout.addWidget(self.graphics_widget, 1)
-        self.view_box = self.graphics_widget.addViewBox(row=0, col=0)
-        self.view_box.setAspectLocked(True)
-        self.view_box.invertY(True)
-        self.view_box.setMouseEnabled(x=True, y=True)
+
+        # --- Добавляем AxisItem для левой линейки (вертикальная) ---
+        self.left_axis = pg.AxisItem(orientation='left')
+        self.left_axis.setLabel('Положение', units='мм')
+        # Добавляем линейку в GraphicsLayoutWidget в колонку 0, строку 0
+        self.graphics_widget.addItem(self.left_axis, row=0, col=0)
+
+        # --- Добавляем AxisItem для нижней линейки (горизонтальная) ---
+        self.bottom_axis = pg.AxisItem(orientation='bottom')
+        # Устанавливаем пустую строку в качестве метки И единиц измерения
+        self.bottom_axis.setLabel('')
+        # Добавляем линейку в GraphicsLayoutWidget в колонку 1, строку 1
+        self.graphics_widget.addItem(self.bottom_axis, row=1, col=1)
+
+
+        # --- Создаем ViewBox для изображения в следующей колонке ---
+        self.view_box = self.graphics_widget.addViewBox(row=0, col=1) # Размещаем в колонке 1, строке 0
+        self.view_box.setAspectLocked(True) # Сохраняем пропорции
+        self.view_box.invertY(True) # Инвертируем ось Y, чтобы начало было сверху (как в DICOM)
+        self.view_box.setMouseEnabled(x=True, y=True) # Включаем панорамирование и масштабирование мышью
+
+        # --- Связываем левую линейку с осью Y ViewBox ---
+        self.left_axis.linkToView(self.view_box)
+
+        # --- Связываем нижнюю линейку с осью X ViewBox ---
+        self.bottom_axis.linkToView(self.view_box)
+
+
+        # --- Устанавливаем фактор растяжения колонок ---
+        # Колонка с ViewBox и нижней линейкой получает больше пространства
+        self.graphics_widget.ci.layout.setColumnStretchFactor(1, 10)
+        # Устанавливаем фактор растяжения строк (строка с ViewBox и левой линейкой получает больше пространства)
+        self.graphics_widget.ci.layout.setRowStretchFactor(0, 10)
+
+
+        # --- Создаем ImageItem для отображения КТ снимка ---
         self.img_item = pg.ImageItem()
-        self.view_box.addItem(self.img_item)
+        self.view_box.addItem(self.img_item) # Добавляем img_item в view_box
+
+        # --- Создаем ImageItem для отображения маски сегментации ---
         self.mask_item = pg.ImageItem()
         self.mask_item.setCompositionMode(pg.QtGui.QPainter.CompositionMode_Plus)
-        # Используем более прозрачный цвет для маски
         lut = np.array([[0, 0, 0, 0], [255, 0, 0, 100]], dtype=np.uint8) # Красный, 100 из 255 прозрачность
         self.mask_item.setLookupTable(lut)
-        self.mask_item.setVisible(False)
-        self.view_box.addItem(self.mask_item)
+        self.mask_item.setVisible(False) # Изначально скрываем маску
+        self.view_box.addItem(self.mask_item) # Добавляем mask_item в view_box
+
 
         bottom_panel = QWidget()
         bottom_layout = QVBoxLayout(bottom_panel)
@@ -320,6 +367,9 @@ class ViewerPanel(QWidget):
         # self.run_segment_btn.setEnabled(False)
         # self.run_full_segment_btn.setEnabled(False)
         self.info_label.setText("Нет загруженных данных")
+        # --- Очищаем HU Label ---
+        self.hu_label.setText("HU: N/A")
+        # ------------------------
         self.current_volume_hu = None
         self.current_pixel_data_hu = None
         self.segmentation_mask = None
@@ -420,7 +470,7 @@ class ViewerPanel(QWidget):
         volume_hu_list = []
         first_ds = None
         try:
-            # Используем переданный экземпляр DicomLoader
+            # Используем переданный экземпямпляр DicomLoader
             dicom_loader = self.dicom_loader
             if dicom_loader is None:
                  # Этого не должно произойти, если DicomLoader передан в конструктор
@@ -469,6 +519,38 @@ class ViewerPanel(QWidget):
              self.prev_slice_btn.setEnabled(True)
              self.next_slice_btn.setEnabled(True)
 
+             # --- Get Pixel Spacing and set img_item pixelization ---
+             row_spacing = 1.0 # Default if not found
+             col_spacing = 1.0 # Default if not found
+             if files and first_ds:
+                  try:
+                       pixel_spacing = getattr(first_ds, 'PixelSpacing', None)
+                       if pixel_spacing and len(pixel_spacing) == 2:
+                            # PixelSpacing is [row_spacing, column_spacing]
+                            row_spacing = float(pixel_spacing[0])
+                            col_spacing = float(pixel_spacing[1])
+                            logger.info(f"Pixel Spacing found: Row={row_spacing}mm, Col={col_spacing}mm")
+                            # Устанавливаем реальный размер пикселя для img_item
+                            self.img_item.setPixelSize(x=col_spacing, y=row_spacing)
+                            # Устанавливаем единицы измерения для левой линейки
+                            self.left_axis.setLabel('Положение', units='мм')
+
+
+                            # Optional: Set origin if Image Position (Patient) is available
+                            # This is more complex and might require calculating the position of the first pixel.
+                            # Let's skip this for now and assume the origin is at the top-left of the image data.
+                            # The setPixelSize should handle scaling correctly for the axis.
+                            # image_position = getattr(first_ds, 'ImagePositionPatient', None)
+                            # if image_position and len(image_position) == 3:
+                            #      pass # Handle origin if needed later
+
+                  except Exception as e:
+                       logger.warning(f"Не удалось получить Pixel Spacing или установить pixelization: {e}")
+             else:
+                  logger.warning("Pixel Spacing не доступен (нет файлов или ds). Использование дефолтного 1.0мм.")
+                  # Используем дефолтный размер пикселя, если информация недоступна
+                  self.img_item.setPixelSize(x=1.0, y=1.0)
+
              self._update_slice_display(self.slice_slider.value())
 
              patient_name_obj = getattr(first_ds, 'PatientName', 'N/A') if first_ds else 'N/A'
@@ -504,10 +586,8 @@ class ViewerPanel(QWidget):
         # Получаем настройки окна из WindowPresets
         window_center, window_width = WindowPresets.get_preset("Легочное")
         display_image_hu = self.current_pixel_data_hu
-        self.img_item.setImage(display_image_hu.T) # Транспонируем для правильной ориентации
-        min_level = window_center - window_width / 2.0
-        max_level = window_center + window_width / 2.0
-        self.img_item.setLevels([min_level, max_level])
+        # Используем setImage с autoLevels=False и levels для применения окна
+        self.img_item.setImage(display_image_hu.T, autoLevels=False, levels=[window_center - window_width / 2.0, window_center + window_width / 2.0]) # Транспонируем для правильной ориентации
 
         # Автоматическое масштабирование при первой загрузке среза
         if not hasattr(self, '_view_reset_done') or not self._view_reset_done:
@@ -743,7 +823,7 @@ class ViewerPanel(QWidget):
         # Включаем кнопки обратно и обновляем их состояние
         self._set_segmentation_controls_enabled(True)
         self._update_segmentation_controls_state()
-        # Очищаем ссылки здесь, т.к. finished потока уже сработал
+        # Очищаем ссылки здесь, т.k. finished потока уже сработал
         # _clear_segmentation_thread_refs вызывается по сигналу finished потока
         # self._clear_segmentation_thread_refs() # Убрали повторный вызов
 
@@ -891,4 +971,45 @@ class ViewerPanel(QWidget):
 
         # Состояние чекбокса не меняем этим методом
         # self.segment_checkbox.setEnabled(...)
+
+    # @pyqtSlot(QPointF) # Удален декоратор
+    def _on_mouse_moved(self, pos):
+        """
+        Обработчик движения мыши для отображения HU.
+        Позиция 'pos' находится в координатах сцены (graphics_widget).
+        """
+        # Проверяем, есть ли загруженные данные среза
+        if self.current_pixel_data_hu is None:
+            self.hu_label.setText("HU: N/A")
+            return
+
+        # Преобразуем координаты сцены в координаты изображения
+        # Используем mapFromScene для преобразования из координат сцены в координаты ImageItem
+        pos_in_img_item = self.img_item.mapFromScene(pos)
+
+        # Получаем целочисленные координаты пикселя в системе координат ImageItem
+        # Эти координаты должны соответствовать индексам numpy массива после учета setPixelSize
+        x = int(pos_in_img_item.x())
+        y = int(pos_in_img_item.y())
+
+        # Получаем размеры текущего среза (height, width)
+        height, width = self.current_pixel_data_hu.shape
+
+        # Проверяем, находится ли курсор внутри границ изображения по индексам массива
+        # Учитываем, что y соответствует строкам (height), x - столбцам (width)
+        if 0 <= y < height and 0 <= x < width:
+            try:
+                # Получаем значение HU из исходных данных по индексам [строка, столбец]
+                hu_value = self.current_pixel_data_hu[y, x]
+                self.hu_label.setText(f"HU: {hu_value:.1f}") # Форматируем до 1 знака после запятой
+            except IndexError:
+                 # Этого не должно произойти, если проверки границ выше верны,
+                 # но на всякий случай обрабатываем
+                 self.hu_label.setText("HU: N/A (вне границ)")
+            except Exception as e:
+                 logger.error(f"Ошибка при получении значения HU: {e}")
+                 self.hu_label.setText("HU: Ошибка")
+        else:
+            # Если курсор вне изображения
+            self.hu_label.setText("HU: N/A (вне изображения)")
 
