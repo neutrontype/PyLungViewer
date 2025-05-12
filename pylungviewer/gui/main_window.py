@@ -41,7 +41,7 @@ class MainWindow(QMainWindow):
         logger.info("Главное окно инициализировано")
 
     def _init_ui(self):
-        self.setWindowTitle("PyLungViewer - Анализатор КТ снимков лёгких")
+        self.setWindowTitle("🤬")
         self.setMinimumSize(1024, 768)
         self.central_widget = QSplitter(Qt.Horizontal)
         self.setCentralWidget(self.central_widget)
@@ -95,10 +95,10 @@ class MainWindow(QMainWindow):
         self.exit_action.triggered.connect(self.close)
 
         # --- Действия для работы с просмотром ---
-        self.zoom_in_action = QAction("Увеличить", self)
+        self.zoom_in_action = QAction("Уменьшить", self)
         self.zoom_in_action.setShortcut("Ctrl++")
         self.zoom_in_action.triggered.connect(self._on_zoom_in)
-        self.zoom_out_action = QAction("Уменьшить", self)
+        self.zoom_out_action = QAction("Увеличить", self)
         self.zoom_out_action.setShortcut("Ctrl+-")
         self.zoom_out_action.triggered.connect(self._on_zoom_out)
         self.reset_view_action = QAction("Сбросить вид", self)
