@@ -3,7 +3,7 @@
 
 """
 Панель просмотра DICOM изображений для приложения PyLungViewer.
-(Версия с интеграцией сегментации + Сегментация всего объема + Отображение HU при наведении мыши + Две линейки без нижней метки и единиц)
+(Версия с интеграцией сегментации + Сегментация всего объема + Отображение HU при наведении мыши + Две линейки без нижней метки и единиц + Белые метки сторон A, P, R, L с прозрачным фоном)
 """
 
 import logging
@@ -13,9 +13,11 @@ import glob # Добавляем для поиска файлов
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QSlider, QPushButton, QFrame, QApplication,
-    QCheckBox, QMessageBox, QProgressDialog
+    QCheckBox, QMessageBox, QProgressDialog,
+    QGraphicsProxyWidget, # Импортируем для добавления виджетов в сцену pyqtgraph
+    QGraphicsItem # Импортируем QGraphicsItem для доступа к флагам
 )
-from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot, QEvent, QObject, QDateTime, QPointF, QThread, QTimer
+from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot, QEvent, QObject, QDateTime, QPointF, QThread, QTimer, QRectF
 from PyQt5.QtGui import QIcon, QColor
 import pyqtgraph as pg
 
@@ -232,6 +234,51 @@ class ViewerPanel(QWidget):
         self.mask_item.setVisible(False) # Изначально скрываем маску
         self.view_box.addItem(self.mask_item) # Добавляем mask_item в view_box
 
+        # --- Добавляем метки сторон (A, P, R, L) ---
+        # Создаем QLabel для каждой метки
+        # Изменен цвет на белый и добавлен прозрачный фон
+        label_style = "font-size: 16pt; font-weight: medium; color: white; background-color: transparent;" # Стиль меток
+        self.label_a = QLabel("A")
+        self.label_a.setStyleSheet(label_style)
+        self.label_p = QLabel("P")
+        self.label_p.setStyleSheet(label_style)
+        self.label_l = QLabel("L")
+        self.label_l.setStyleSheet(label_style)
+        self.label_r = QLabel("R")
+        self.label_r.setStyleSheet(label_style)
+
+        # Оборачиваем QLabel в QGraphicsProxyWidget для добавления в сцену pyqtgraph
+        self.proxy_a = QGraphicsProxyWidget()
+        self.proxy_a.setWidget(self.label_a)
+        self.proxy_p = QGraphicsProxyWidget()
+        self.proxy_p.setWidget(self.label_p)
+        self.proxy_l = QGraphicsProxyWidget()
+        self.proxy_l.setWidget(self.label_l)
+        self.proxy_r = QGraphicsProxyWidget()
+        self.proxy_r.setWidget(self.label_r)
+
+        # Добавляем proxy виджеты в ViewBox
+        self.view_box.addItem(self.proxy_a)
+        self.view_box.addItem(self.proxy_p)
+        self.view_box.addItem(self.proxy_l)
+        # Используем QGraphicsItem для доступа к флагу
+        self.proxy_r.setFlag(QGraphicsItem.ItemIgnoresTransformations) # Игнорировать трансформации для R, чтобы оставалась справа
+        self.view_box.addItem(self.proxy_r)
+
+        # Устанавливаем высокий Z-value, чтобы метки были поверх изображения и маски
+        self.proxy_a.setZValue(100)
+        self.proxy_p.setZValue(100)
+        self.proxy_l.setZValue(100)
+        self.proxy_r.setZValue(100)
+
+
+        # Подключаем сигнал изменения диапазона ViewBox к слоту обновления позиций меток
+        self.view_box.sigRangeChanged.connect(self._update_side_label_positions)
+        # Удаляем подключение к несуществующему сигналу sigResized
+        # self.graphics_widget.sigResized.connect(self._update_side_label_positions)
+
+        # ------------------------------------------
+
 
         bottom_panel = QWidget()
         bottom_layout = QVBoxLayout(bottom_panel)
@@ -287,6 +334,107 @@ class ViewerPanel(QWidget):
 
         main_layout.addWidget(bottom_panel)
         self._show_placeholder()
+
+        # Вызываем обновление позиций меток после полной инициализации UI
+        # Это нужно, чтобы метки правильно расположились при первом отображении
+        QTimer.singleShot(0, self._update_side_label_positions)
+
+
+    # --- Добавлен метод resizeEvent ---
+    def resizeEvent(self, event):
+        """
+        Обработчик события изменения размера виджета.
+        Вызывается при изменении размера ViewerPanel.
+        """
+        super().resizeEvent(event) # Вызываем базовый обработчик
+        # Обновляем позиции меток сторон при изменении размера
+        self._update_side_label_positions()
+    # ----------------------------------
+
+
+    def _update_side_label_positions(self):
+        """Обновляет позиции меток сторон (A, P, R, L) в зависимости от текущего диапазона ViewBox."""
+        if self.view_box is None or self.img_item is None:
+            return
+
+        # Получаем текущий видимый диапазон ViewBox в координатах данных (после применения setPixelSize)
+        view_range = self.view_box.viewRange()
+        x_min_data, x_max_data = view_range[0]
+        y_min_data, y_max_data = view_range[1]
+
+        # Получаем размеры изображения в координатах данных
+        img_bounds_data = self.img_item.boundingRect()
+        img_x_data = img_bounds_data.x()
+        img_y_data = img_bounds_data.y()
+        img_width_data = img_bounds_data.width()
+        img_height_data = img_bounds_data.height()
+
+        # Получаем текущие размеры ViewBox в координатах сцены (пикселях экрана)
+        view_rect_scene = self.view_box.mapRectToScene(self.view_box.viewRect())
+        view_width_scene = view_rect_scene.width()
+        view_height_scene = view_rect_scene.height()
+
+        # Получаем размеры меток в пикселях экрана
+        label_a_size = self.proxy_a.size()
+        label_p_size = self.proxy_p.size()
+        label_l_size = self.proxy_l.size()
+        label_r_size = self.proxy_r.size()
+
+        # Рассчитываем небольшой отступ от края в пикселях экрана
+        offset_pixels = 10 # 10 пикселей отступа
+
+        # Рассчитываем позиции меток в координатах сцены (пикселях экрана)
+        # Затем преобразуем эти координаты сцены обратно в координаты ViewBox (данных)
+        # Это нужно, потому что setPos работает в координатах родительского элемента,
+        # а для proxy виджетов, добавленных в ViewBox, родитель - ViewBox.
+        # Однако, ViewBox масштабируется, поэтому позиционировать нужно относительно
+        # границ ViewBox в координатах сцены, а затем конвертировать.
+
+        # Позиция 'A' (Anterior) - Верхний центр
+        # Центр по X в координатах сцены
+        center_x_scene = view_rect_scene.x() + view_width_scene / 2
+        # Верхний край по Y в координатах сцены + отступ
+        top_y_scene = view_rect_scene.y() + offset_pixels
+        # Координаты верхнего левого угла метки 'A' в координатах сцены
+        pos_a_scene = QPointF(center_x_scene - label_a_size.width() / 2, top_y_scene)
+        # Преобразуем координаты сцены в координаты ViewBox (данных)
+        pos_a_data = self.view_box.mapFromScene(pos_a_scene)
+        self.proxy_a.setPos(pos_a_data)
+
+
+        # Позиция 'P' (Posterior) - Нижний центр
+        # Центр по X в координатах сцены
+        center_x_scene = view_rect_scene.x() + view_width_scene / 2
+        # Нижний край по Y в координатах сцены - отступ - высота метки
+        bottom_y_scene = view_rect_scene.y() + view_height_scene - offset_pixels - label_p_size.height()
+        # Координаты верхнего левого угла метки 'P' в координатах сцены
+        pos_p_scene = QPointF(center_x_scene - label_p_size.width() / 2, bottom_y_scene)
+        # Преобразуем координаты сцены в координаты ViewBox (данных)
+        pos_p_data = self.view_box.mapFromScene(pos_p_scene)
+        self.proxy_p.setPos(pos_p_data)
+
+        # Позиция 'L' (Left) - Левый центр
+        # Левый край по X в координатах сцены + отступ
+        left_x_scene = view_rect_scene.x() + offset_pixels
+        # Центр по Y в координатах сцены
+        center_y_scene = view_rect_scene.y() + view_height_scene / 2
+        # Координаты верхнего левого угла метки 'L' в координатах сцены
+        pos_l_scene = QPointF(left_x_scene, center_y_scene - label_l_size.height() / 2)
+        # Преобразуем координаты сцены в координаты ViewBox (данных)
+        pos_l_data = self.view_box.mapFromScene(pos_l_scene)
+        self.proxy_l.setPos(pos_l_data)
+
+        # Позиция 'R' (Right) - Правый центр
+        # Правый край по X в координатах сцены - отступ - ширина метки
+        right_x_scene = view_rect_scene.x() + view_width_scene - offset_pixels - label_r_size.width()
+        # Центр по Y в координатах сцены
+        center_y_scene = view_rect_scene.y() + view_height_scene / 2
+        # Координаты верхнего левого угла метки 'R' в координатах сцены
+        pos_r_scene = QPointF(right_x_scene, center_y_scene - label_r_size.height() / 2)
+        # Преобразуем координаты сцены в координаты ViewBox (данных)
+        pos_r_data = self.view_box.mapFromScene(pos_r_scene)
+        self.proxy_r.setPos(pos_r_data)
+
 
     def _update_segmentation_button_tooltips(self):
          """ Обновляет подсказки для кнопок сегментации в зависимости от доступности модуля. """
@@ -376,6 +524,8 @@ class ViewerPanel(QWidget):
         self.full_segmentation_mask_volume = None
         # Обновляем состояние кнопок после сброса данных
         self._update_segmentation_controls_state()
+        # Обновляем позиции меток сторон после сброса вида
+        self._update_side_label_positions()
 
 
     def eventFilter(self, obj, event):
@@ -593,6 +743,9 @@ class ViewerPanel(QWidget):
         if not hasattr(self, '_view_reset_done') or not self._view_reset_done:
              self.view_box.autoRange()
              self._view_reset_done = True
+             # Вызываем обновление позиций меток после первого autoRange
+             self._update_side_label_positions()
+
 
         # Обновляем маску и чекбокс
         if has_full_mask:
@@ -1012,4 +1165,5 @@ class ViewerPanel(QWidget):
         else:
             # Если курсор вне изображения
             self.hu_label.setText("HU: N/A (вне изображения)")
+
 
