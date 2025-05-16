@@ -3,22 +3,25 @@
 
 """
 Панель просмотра DICOM изображений для приложения PyLungViewer.
-(Версия с интеграцией сегментации + Сегментация всего объема + Отображение HU при наведении мыши + Две линейки без нижней метки и единиц + Белые метки сторон A, P, R, L с прозрачным фоном)
+(Версия с интеграцией сегментации + Сегментация всего объема + Отображение HU при наведении мыши + Две линейки без нижней метки и единиц + Белые метки сторон A, P, R, L с прозрачным фоном + Инструмент измерения + Удаление измерения по клавише Delete и через контекстное меню + Сохранение измерений по срезам + Сдвиг текста измерения)
 """
 
 import logging
 import os
 import traceback
 import glob # Добавляем для поиска файлов
+import math # Добавляем для расчета расстояния
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QSlider, QPushButton, QFrame, QApplication,
     QCheckBox, QMessageBox, QProgressDialog,
     QGraphicsProxyWidget, # Импортируем для добавления виджетов в сцену pyqtgraph
-    QGraphicsItem # Импортируем QGraphicsItem для доступа к флагам
+    QGraphicsItem, # Импортируем QGraphicsItem для доступа к флагам
+    QGraphicsLineItem, # Импортируем для работы с линиями на сцене
+    QMenu, QAction # Импортируем для контекстного меню
 )
-from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot, QEvent, QObject, QDateTime, QPointF, QThread, QTimer, QRectF
-from PyQt5.QtGui import QIcon, QColor
+from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot, QEvent, QObject, QDateTime, QPointF, QThread, QTimer, QRectF, QPoint # Импортируем QPoint
+from PyQt5.QtGui import QIcon, QColor, QPen, QKeyEvent, QContextMenuEvent # Импортируем QContextMenuEvent
 import pyqtgraph as pg
 
 # Для визуализации изображений
@@ -41,7 +44,7 @@ except ImportError as e:
     logger.error("!!! Ошибка при импорте модуля сегментации !!!")
     print("--------------------------------------------------")
     print("!!! Ошибка импорта модуля сегментации (viewer_panel.py) !!!")
-    print(f"Ошибка: {e}")
+    f"Ошибка: {e}"
     traceback.print_exc()
     print("--------------------------------------------------")
     logger.warning("Модуль сегментации (pylungviewer.core.segmentation) не найден или его зависимости отсутствуют.")
@@ -120,13 +123,16 @@ class SegmentationWorker(QObject):
 
 # --- Основной класс панели ---
 class ViewerPanel(QWidget):
-    """Панель просмотра DICOM изображений с поддержкой сегментации и отображением HU."""
+    """Панель просмотра DICOM изображений с поддержкой сегментации, отображением HU и измерением."""
 
     slice_changed = pyqtSignal(int)
     segmentation_progress = pyqtSignal(int, int)
     segmentation_status_update = pyqtSignal(str)
-    # Новый сигнал для оповещения главного окна о статусе загрузки модели
     model_loaded_status = pyqtSignal(bool)
+    # Новый сигнал для оповещения главного окна об изменении состояния измерения
+    # Передает: (данные загружены, режим рисования активен, есть ли измерения на текущем срезе)
+    measurement_state_changed = pyqtSignal(bool, bool, bool)
+
 
     # Добавляем models_dir И dicom_loader в параметры конструктора
     def __init__(self, models_dir: str, dicom_loader: DicomLoader, parent=None):
@@ -139,6 +145,16 @@ class ViewerPanel(QWidget):
         self.full_segmentation_mask_volume = None # 3D массив масок
         self.models_dir = models_dir # Сохраняем путь к папке моделей
         self.dicom_loader = dicom_loader # Сохраняем экземпляр DicomLoader
+
+        # --- Переменные для инструмента измерения ---
+        self._measurement_mode_active = False # Режим рисования активен
+        self._measurement_start_point = None
+        self._current_measurement_item = None # Текущий измеряемый элемент (линия+текст)
+        # Изменено: словарь для хранения измерений по срезам
+        self._measurements_by_slice = {} # {slice_index: [{'line': item, 'text': item}, ...], ...}
+        self._selected_measurement_item = None # Выбранное измерение для удаления
+        self.pixel_spacing = (1.0, 1.0) # (row_spacing, col_spacing) в мм
+        # -------------------------------------------------------------------------
 
         if SEGMENTATION_AVAILABLE:
             self.segmenter = LungSegmenter()
@@ -155,14 +171,201 @@ class ViewerPanel(QWidget):
 
         self.touch_start_pos = None
         self._init_ui()
-        self.installEventFilter(self)
+        # self.installEventFilter(self) # Фильтр событий теперь не нужен для свайпов, используется mousePressEvent/mouseReleaseEvent
 
         # Включаем отслеживание мыши на graphics_widget
         self.graphics_widget.setMouseTracking(True)
         # Подключаем сигнал sigMouseMoved от сцены к слоту _on_mouse_moved
         self.graphics_widget.scene().sigMouseMoved.connect(self._on_mouse_moved)
 
-        logger.info("Панель просмотра инициализирована (с поддержкой сегментации и отображением HU)")
+        # Подключаем сигналы мыши к ViewBox для обработки кликов в режиме измерения И выбора
+        self.view_box.scene().sigMouseClicked.connect(self._on_view_box_clicked)
+
+        # Устанавливаем фокусную политику для получения событий клавиатуры
+        self.setFocusPolicy(Qt.StrongFocus)
+        # Устанавливаем фокус сразу после инициализации (или при загрузке данных)
+        # self.setFocus() # Лучше устанавливать фокус из MainWindow при загрузке данных
+
+        # Устанавливаем политику контекстного меню
+        self.setContextMenuPolicy(Qt.CustomContextMenu)
+        # Подключаем сигнал к методу класса
+        self.customContextMenuRequested.connect(self._show_context_menu)
+
+
+        logger.info("Панель просмотра инициализирована (с поддержкой сегментации, HU и измерением)")
+
+    # --- Перемещенный метод contextMenuEvent для обработки правого клика ---
+    # Этот метод вызывается автоматически при правом клике, если установлена политика CustomContextMenu
+    def contextMenuEvent(self, event: QContextMenuEvent):
+        """
+        Обработчик события контекстного меню (правый клик).
+        Показывает меню с опцией удаления для выбранного измерения.
+        """
+        logger.debug(f"Context menu event at position: {event.pos()}")
+        # Проверяем, есть ли выбранное измерение
+        if self._selected_measurement_item:
+            context_menu = QMenu(self)
+            delete_action = QAction("Удалить измерение", self)
+            # Подключаем действие к методу удаления
+            delete_action.triggered.connect(self._delete_selected_measurement)
+            context_menu.addAction(delete_action)
+            # Показываем меню в глобальной позиции клика
+            context_menu.exec_(self.mapToGlobal(event.pos()))
+        else:
+            # Если нет выбранного измерения, можно показать другое меню или ничего не делать
+            # Например, можно показать стандартное меню ViewBox, если оно есть и нужно
+            # super().contextMenuEvent(event) # Передаем событие базовому классу
+            logger.debug("Контекстное меню не показано: нет выбранного измерения.")
+            pass # Ничего не делаем, если нет выбранного измерения
+    # ---------------------------------------------------------------------
+
+    # --- Перемещенный метод _show_context_menu (теперь это обработчик сигнала) ---
+    # Этот метод вызывается сигналом customContextMenuRequested
+    @pyqtSlot(QPoint) # ИСПРАВЛЕНО: Ожидаем QPoint, как испускает сигнал
+    def _show_context_menu(self, pos: QPoint):
+        """
+        Слот для отображения контекстного меню по сигналу customContextMenuRequested.
+        """
+        logger.debug(f"Received customContextMenuRequested at pos: {pos}")
+        # Преобразуем координаты виджета в глобальные координаты экрана
+        global_pos = self.mapToGlobal(pos) # Используем QPoint напрямую
+
+        # Получаем позицию клика в координатах сцены
+        click_pos_scene = self.graphics_widget.mapToScene(pos) # Преобразуем из координат виджета в координаты сцены
+
+        # Проверяем, есть ли элементы сцены под курсором
+        items_at_pos = self.view_box.scene().items(click_pos_scene)
+        logger.debug(f"Items at right-click position: {items_at_pos}")
+
+        selected_measurement = None
+        # Проходим по всем элементам под курсором
+        for item in items_at_pos:
+             # Проверяем, является ли элемент линией измерения из нашего списка
+             # Ищем в измерениях текущего среза
+             current_slice_measurements = self._measurements_by_slice.get(self.current_slice_index, [])
+             for measurement in current_slice_measurements:
+                  if item == measurement['line']:
+                       selected_measurement = measurement
+                       break # Нашли совпадение, выбираем его
+             if selected_measurement:
+                  break # Прекращаем поиск по элементам, если измерение найдено
+
+        # Снимаем выделение с предыдущего, если оно было
+        self._deselect_measurement()
+
+        context_menu = QMenu(self)
+
+        if selected_measurement:
+            # Если клик правой кнопкой мыши попал по измерению
+            logger.debug("Правый клик по измерению. Выделяем и показываем меню удаления.")
+            self._selected_measurement_item = selected_measurement
+            self._selected_measurement_item['line'].setPen(pg.mkPen('cyan', width=3)) # Визуально выделяем
+            delete_action = QAction("Удалить измерение", self)
+            delete_action.triggered.connect(self._delete_selected_measurement)
+            context_menu.addAction(delete_action)
+        else:
+            # Если клик правой кнопкой мыши не попал по измерению (пустое место)
+            logger.debug("Правый клик по пустому месту. Контекстное меню измерений не показывается.")
+            # В этом случае не добавляем никаких действий в контекстное меню
+            pass # Ничего не делаем
+
+        # Показываем меню в глобальной позиции
+        if context_menu.actions(): # Показываем меню только если в нем есть действия
+             context_menu.exec_(global_pos)
+
+
+    # -----------------------------------------------------------------------------
+
+    # --- Перемещенные методы сегментации ---
+    @pyqtSlot()
+    def run_single_slice_segmentation(self):
+        """ Запускает сегментацию только для текущего среза. """
+        # Проверка доступности сегментации
+        if not self._check_segmentation_prerequisites(): return
+
+        logger.info(f"Запуск сегментации для среза {self.current_slice_index + 1}...")
+        self.segmentation_status_update.emit(f"Сегментация среза {self.current_slice_index + 1}...")
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            # Сбрасываем полную маску, так как результат будет только для одного среза
+            self.full_segmentation_mask_volume = None
+            # Деактивируем чекбокс полной маски
+            # self.segment_checkbox.setEnabled(False) # Это делается в _update_segmentation_controls_state
+
+            # Выполняем предсказание
+            single_mask = self.segmenter.predict(self.current_pixel_data_hu)
+
+            if single_mask is not None:
+                logger.info("Сегментация среза завершена успешно.")
+                # Сохраняем маску для текущего среза
+                self.segmentation_mask = single_mask
+                # Активируем и включаем чекбокс отображения текущей маски
+                # self.segment_checkbox.setEnabled(True) # Делается в _update_segmentation_controls_state
+                self.segment_checkbox.setChecked(True) # Включаем чекбокс, т.к. маска среза доступна
+                self._update_mask_overlay() # Отображаем маску
+                self.segmentation_status_update.emit(f"Сегментация среза {self.current_slice_index + 1} завершена.")
+            else:
+                logger.error("Сегментация среза не удалась.")
+                QMessageBox.critical(self, "Ошибка сегментации", "Не удалось выполнить сегментацию среза.")
+                # Сбрасываем маску и деактивируем чекбокс
+                self.segmentation_mask = None
+                # self.segment_checkbox.setEnabled(False) # Делается в _update_segmentation_controls_state
+                self.segment_checkbox.setChecked(False)
+                self._update_mask_overlay() # Скрываем оверлей
+                self.segmentation_status_update.emit("Ошибка сегментации среза.")
+        except Exception as e:
+             logger.error(f"Исключение при сегментации среза: {e}", exc_info=True)
+             QMessageBox.critical(self, "Ошибка сегментации", f"Произошла ошибка при сегментации среза:\n{str(e)}")
+             self.segmentation_mask = None
+             # self.segment_checkbox.setEnabled(False) # Делается в _update_segmentation_controls_state
+             self.segment_checkbox.setChecked(False)
+             self._update_mask_overlay()
+             self.segmentation_status_update.emit("Ошибка сегментации среза.")
+        finally:
+            QApplication.restoreOverrideCursor()
+            # Обновляем состояние кнопок после завершения (успеха или ошибки)
+            self._update_segmentation_controls_state()
+
+
+    @pyqtSlot()
+    def start_full_segmentation(self):
+        """ Запускает сегментацию всего объема в фоновом потоке. """
+        # Проверка доступности сегментации
+        if not self._check_segmentation_prerequisites(): return
+        if self.segmentation_thread is not None and self.segmentation_thread.isRunning():
+            QMessageBox.information(self, "Сегментация", "Сегментация всего объема уже запущена.")
+            return
+
+        logger.info("Запуск сегментации всего объема...")
+        self.segmentation_status_update.emit("Сегментация всего объема...")
+        self._set_segmentation_controls_enabled(False) # Отключаем кнопки во время процесса
+
+        num_slices = self.current_volume_hu.shape[0] if self.current_volume_hu is not None else 0
+        parent_widget = self.parent() if self.parent() else self
+        self.progress_dialog = QProgressDialog("Сегментация всего объема...", "Отмена", 0, num_slices, parent_widget)
+        self.progress_dialog.setWindowModality(Qt.WindowModal)
+        self.progress_dialog.setMinimumDuration(1000) # Показываем диалог только если процесс занимает > 1 сек
+        self.progress_dialog.setAutoReset(True)
+        self.progress_dialog.setAutoClose(True)
+        self.progress_dialog.setValue(0)
+        self.progress_dialog.canceled.connect(self.cancel_segmentation)
+        self.progress_dialog.show()
+
+        self.segmentation_thread = QThread(self)
+        self.segmentation_worker = SegmentationWorker(self.segmenter, self.current_volume_hu)
+        self.segmentation_worker.moveToThread(self.segmentation_thread)
+        self.segmentation_worker.progress.connect(self._on_full_segmentation_progress)
+        self.segmentation_worker.finished.connect(self._on_full_segmentation_finished)
+        self.segmentation_worker.error.connect(self._on_segmentation_error)
+        self.segmentation_thread.started.connect(self.segmentation_worker.run)
+        # Подключаем finished потока для очистки ссылок
+        self.segmentation_thread.finished.connect(self.segmentation_thread.deleteLater)
+        self.segmentation_worker.finished.connect(self.segmentation_worker.deleteLater)
+        # Подключаем finished потока к _clear_segmentation_thread_refs
+        self.segmentation_thread.finished.connect(self._clear_segmentation_thread_refs)
+        self.segmentation_thread.start()
+    # ----------------------------------------
+
 
     def _init_ui(self):
         # ... (UI initialization code remains the same) ...
@@ -188,13 +391,13 @@ class ViewerPanel(QWidget):
         self.graphics_widget = pg.GraphicsLayoutWidget()
         main_layout.addWidget(self.graphics_widget, 1)
 
-        # --- Добавляем AxisItem для левой линейки (вертикальная) ---
+        # --- Добавляем AxisItem для левой линейки (vertical) ---
         self.left_axis = pg.AxisItem(orientation='left')
         self.left_axis.setLabel('Положение', units='мм')
         # Добавляем линейку в GraphicsLayoutWidget в колонку 0, строку 0
         self.graphics_widget.addItem(self.left_axis, row=0, col=0)
 
-        # --- Добавляем AxisItem для нижней линейки (горизонтальная) ---
+        # --- Добавляем AxisItem для нижней линейки (horizontal) ---
         self.bottom_axis = pg.AxisItem(orientation='bottom')
         # Устанавливаем пустую строку в качестве метки И единиц измерения
         self.bottom_axis.setLabel('')
@@ -206,7 +409,14 @@ class ViewerPanel(QWidget):
         self.view_box = self.graphics_widget.addViewBox(row=0, col=1) # Размещаем в колонке 1, строке 0
         self.view_box.setAspectLocked(True) # Сохраняем пропорции
         self.view_box.invertY(True) # Инвертируем ось Y, чтобы начало было сверху (как в DICOM)
-        self.view_box.setMouseEnabled(x=True, y=True) # Включаем панорамирование и масштабирование мышью
+        # Отключаем стандартное панорамирование и масштабирование мышью,
+        # чтобы обрабатывать клики для измерения
+        # Включаем панорамирование и масштабирование по умолчанию,
+        # и отключаем их только при активном режиме измерения
+        self.view_box.setMouseEnabled(x=True, y=True)
+        # Но включаем колесо мыши для прокрутки срезов
+        self.view_box.wheelEvent = self._handle_view_box_wheel_event
+
 
         # --- Связываем левую линейку с осью Y ViewBox ---
         self.left_axis.linkToView(self.view_box)
@@ -305,6 +515,25 @@ class ViewerPanel(QWidget):
         slider_panel.addWidget(self.next_slice_btn)
         bottom_layout.addLayout(slider_panel)
 
+        controls_panel = QHBoxLayout()
+
+        # --- Кнопка активации режима измерения УДАЛЕНА ---
+        # self.measure_btn = QPushButton("Измерение")
+        # self.measure_btn.setCheckable(True) # Делаем кнопку переключаемой
+        # self.measure_btn.setToolTip("Активировать/деактивировать режим измерения расстояний")
+        # self.measure_btn.toggled.connect(self._on_measure_toggle)
+        # controls_panel.addWidget(self.measure_btn)
+        # -------------------------------------------------
+
+        # --- Кнопка очистки измерений УДАЛЕНА ---
+        # self.clear_measurements_btn = QPushButton("Очистить измерения")
+        # self.clear_measurements_btn.setToolTip("Удалить все текущие измерения на срезе")
+        # self.clear_measurements_btn.clicked.connect(self._clear_measurements)
+        # controls_panel.addWidget(self.clear_measurements_btn)
+        # ----------------------------------------
+
+        controls_panel.addStretch(1) # Добавляем растяжку для выравнивания
+
         segment_panel = QHBoxLayout()
         self.segment_checkbox = QCheckBox("Показать сегментацию")
         self.segment_checkbox.toggled.connect(self._on_segment_toggle)
@@ -312,11 +541,13 @@ class ViewerPanel(QWidget):
         self.segment_checkbox.setEnabled(False)
 
         self.run_segment_btn = QPushButton("Сегм. срез")
+        # Подключаем кнопку к методу run_single_slice_segmentation
         self.run_segment_btn.clicked.connect(self.run_single_slice_segmentation)
         # Изначально выключен, включается при наличии модели и данных
         self.run_segment_btn.setEnabled(False)
 
         self.run_full_segment_btn = QPushButton("Сегм. весь объем")
+        # Подключаем кнопку к методу start_full_segmentation
         self.run_full_segment_btn.clicked.connect(self.start_full_segmentation)
         # Изначально выключен, включается при наличии модели и данных
         self.run_full_segment_btn.setEnabled(False)
@@ -330,7 +561,11 @@ class ViewerPanel(QWidget):
         segment_panel.addStretch(1)
         segment_panel.addWidget(self.run_segment_btn)
         segment_panel.addWidget(self.run_full_segment_btn)
+
+        # Добавляем панель управления и панель сегментации в нижний layout
+        bottom_layout.addLayout(controls_panel)
         bottom_layout.addLayout(segment_panel)
+
 
         main_layout.addWidget(bottom_panel)
         self._show_placeholder()
@@ -350,6 +585,23 @@ class ViewerPanel(QWidget):
         # Обновляем позиции меток сторон при изменении размера
         self._update_side_label_positions()
     # ----------------------------------
+
+
+    # --- Добавлен метод keyPressEvent для обработки нажатия Delete ---
+    def keyPressEvent(self, event: QKeyEvent):
+        """
+        Обработчик нажатия клавиш.
+        Используется для удаления выбранного измерения по клавише Delete.
+        """
+        logger.debug(f"Key press event: {event.key()}, text: '{event.text()}', isAccepted: {event.isAccepted()}")
+        if event.key() == Qt.Key_Delete:
+            logger.debug("Нажата клавиша Delete.")
+            self._delete_selected_measurement()
+            event.accept() # Принимаем событие
+        else:
+            # Передаем событие базовому классу для стандартной обработки
+            super().keyPressEvent(event)
+    # -----------------------------------------------------------------
 
 
     def _update_side_label_positions(self):
@@ -446,7 +698,7 @@ class ViewerPanel(QWidget):
          else:
              self.segment_checkbox.setToolTip("Показать/скрыть маску сегментации")
              self.run_segment_btn.setToolTip("Сегментировать только текущий срез (требуется загруженная модель)")
-             self.run_full_segment_btn.setToolTip("Сегментировать все срезы серии (требуется загруженная модель)")
+             self.run_full_segment_btn.setToolTip("Сегментировать все срезы серии (может занять время, требуется загруженная модель)")
 
 
     def _auto_load_model(self):
@@ -522,57 +774,52 @@ class ViewerPanel(QWidget):
         self.current_pixel_data_hu = None
         self.segmentation_mask = None
         self.full_segmentation_mask_volume = None
+        self.pixel_spacing = (1.0, 1.0) # Сбрасываем Pixel Spacing
+        self._clear_measurements_on_slice(self.current_slice_index) # Очищаем измерения при сбросе
         # Обновляем состояние кнопок после сброса данных
         self._update_segmentation_controls_state()
         # Обновляем позиции меток сторон после сброса вида
         self._update_side_label_positions()
+        # Отключаем режим измерения и обновляем состояние действия в MainWindow
+        self.toggle_measurement_mode(False)
 
 
-    def eventFilter(self, obj, event):
-        # ... (remains the same) ...
-        if obj is self:
-            if event.type() == QEvent.Wheel:
-                self._handle_wheel_scroll(event)
-                return True
-            elif event.type() == QEvent.MouseButtonPress:
-                 if event.button() == Qt.LeftButton:
-                     self.touch_start_pos = event.pos()
-                     return True
-            elif event.type() == QEvent.MouseMove:
-                 if self.touch_start_pos is not None and event.buttons() & Qt.LeftButton:
-                     pass # Пока не обрабатываем движение для панорамирования
-            elif event.type() == QEvent.MouseButtonRelease:
-                 if event.button() == Qt.LeftButton and self.touch_start_pos is not None:
-                     end_pos = event.pos()
-                     delta = end_pos - self.touch_start_pos
-                     swipe_threshold = 50 # Порог для определения свайпа
-                     if abs(delta.x()) > abs(delta.y()) and abs(delta.x()) > swipe_threshold:
-                         if delta.x() > 0: self._on_prev_slice()
-                         else: self._on_next_slice()
-                         self.touch_start_pos = None
-                         return True
-                     self.touch_start_pos = None
-                 self.touch_start_pos = None # Сбрасываем даже если не было свайпа
-        return super().eventFilter(obj, event)
+    # Удаляем eventFilter, т.к. колесо мыши обрабатывается в _handle_view_box_wheel_event
+    # и клики мыши в _on_view_box_clicked
+    # def eventFilter(self, obj, event):
+    #     ...
 
+    def _handle_view_box_wheel_event(self, event):
+        """
+        Обработчик события колеса мыши для ViewBox.
+        Используется для прокрутки срезов.
+        """
+        # logger.debug(f"Wheel event in ViewBox: {event.angleDelta().y()}")
+        if self.current_series is None or not self.current_series.get('files', []):
+            # logger.debug("Wheel event: No series loaded.")
+            return # Не обрабатываем, если нет загруженных данных
 
-    def _handle_wheel_scroll(self, event):
-        # ... (remains the same) ...
-        if self.current_series is None or not self.current_series.get('files', []): return
-        current_time = QDateTime.currentMSecsSinceEpoch()
-        scroll_interval = 50 # Минимальный интервал между прокрутками в мс
-        if not hasattr(self, '_last_scroll_time'): self._last_scroll_time = 0
-        if current_time - self._last_scroll_time >= scroll_interval:
-            self._last_scroll_time = current_time
-            delta = event.angleDelta().y()
-            step = 1
-            total_slices = len(self.current_series.get('files', []))
-            # Увеличиваем шаг прокрутки для больших серий
-            if total_slices > 100: step = max(1, total_slices // 50)
-            current_index = self.current_slice_index
-            if delta > 0: new_index = max(0, current_index - step)
-            else: new_index = min(total_slices - 1, current_index + step)
-            if new_index != current_index: self.slice_slider.setValue(new_index)
+        # --- Исправлено: используем event.delta() вместо event.angleDelta().y() ---
+        delta = event.delta()
+        # -------------------------------------------------------------------------
+
+        step = 1
+        total_slices = len(self.current_series.get('files', []))
+        # Увеличиваем шаг прокрутки для больших серий
+        if total_slices > 100: step = max(1, total_slices // 50)
+        current_index = self.current_slice_index
+        if delta > 0: new_index = max(0, current_index - step)
+        else: new_index = min(total_slices - 1, current_index + step)
+
+        # logger.debug(f"Wheel event: Current index {current_index}, New index {new_index}")
+        if new_index != current_index:
+            self.slice_slider.setValue(new_index)
+            # logger.debug(f"Slice slider value set to {new_index}")
+        # else:
+            # logger.debug("Wheel event: Slice index did not change.")
+
+        # Важно: не передаем событие дальше, чтобы предотвратить стандартное масштабирование ViewBox
+        event.accept()
 
 
     # Удаляем метод load_segmentation_model, т.к. загрузка теперь автоматическая
@@ -608,10 +855,17 @@ class ViewerPanel(QWidget):
         self._view_reset_done = False
         self._show_placeholder() # Сбрасываем UI и данные
         self.current_series = series_data
+        # Очищаем все сохраненные измерения при загрузке новой серии
+        self._measurements_by_slice.clear()
+        logger.debug("Все сохраненные измерения очищены при загрузке новой серии.")
+
+
         if series_data is None or not series_data.get('files', []):
             logger.warning("Попытка загрузить пустую серию")
             # Обновляем состояние кнопок после загрузки пустой серии
             self._update_segmentation_controls_state()
+            self._update_measurement_controls_state() # Обновляем состояние измерения
+            self.measurement_state_changed.emit(False, self._measurement_mode_active, False) # Оповещаем MainWindow
             return
         files = series_data.get('files', [])
         slice_count = len(files)
@@ -620,7 +874,7 @@ class ViewerPanel(QWidget):
         volume_hu_list = []
         first_ds = None
         try:
-            # Используем переданный экземпямпляр DicomLoader
+            # Используем переданный экземпляр DicomLoader
             dicom_loader = self.dicom_loader
             if dicom_loader is None:
                  # Этого не должно произойти, если DicomLoader передан в конструктор
@@ -681,9 +935,20 @@ class ViewerPanel(QWidget):
                             col_spacing = float(pixel_spacing[1])
                             logger.info(f"Pixel Spacing found: Row={row_spacing}mm, Col={col_spacing}mm")
                             # Устанавливаем реальный размер пикселя для img_item
-                            self.img_item.setPixelSize(x=col_spacing, y=row_spacing)
+                            # --- Исправлено: Проверяем наличие setPixelSize перед вызовом ---
+                            if hasattr(self.img_item, 'setPixelSize'):
+                                self.img_item.setPixelSize(x=col_spacing, y=row_spacing)
+                            else:
+                                logger.warning("Объект ImageItem не имеет метода setPixelSize. Масштабирование может быть некорректным.")
+                            # -----------------------------------------------------------------
+
                             # Устанавливаем единицы измерения для левой линейки
                             self.left_axis.setLabel('Положение', units='мм')
+                            # Сохраняем pixel_spacing для расчетов измерения
+                            self.pixel_spacing = (row_spacing, col_spacing)
+                            # --- Логируем считанный Pixel Spacing ---
+                            logger.info(f"Считанный Pixel Spacing: {self.pixel_spacing} (row, col)")
+                            # --------------------------------------
 
 
                             # Optional: Set origin if Image Position (Patient) is available
@@ -696,10 +961,19 @@ class ViewerPanel(QWidget):
 
                   except Exception as e:
                        logger.warning(f"Не удалось получить Pixel Spacing или установить pixelization: {e}")
+                       self.pixel_spacing = (1.0, 1.0) # Сбрасываем на дефолт
              else:
                   logger.warning("Pixel Spacing не доступен (нет файлов или ds). Использование дефолтного 1.0мм.")
                   # Используем дефолтный размер пикселя, если информация недоступна
-                  self.img_item.setPixelSize(x=1.0, y=1.0)
+                  # --- Исправлено: Проверяем наличие setPixelSize перед вызовом ---
+                  if hasattr(self.img_item, 'setPixelSize'):
+                      self.img_item.setPixelSize(x=1.0, y=1.0)
+                  else:
+                      logger.warning("Объект ImageItem не имеет метода setPixelSize. Масштабирование может быть некорректным.")
+                  # -----------------------------------------------------------------
+
+                  self.pixel_spacing = (1.0, 1.0) # Сбрасываем на дефолт
+
 
              self._update_slice_display(self.slice_slider.value())
 
@@ -718,13 +992,26 @@ class ViewerPanel(QWidget):
 
         # Обновляем состояние кнопок сегментации после загрузки данных серии
         self._update_segmentation_controls_state()
+        # Обновляем состояние кнопки измерения после загрузки данных серии
+        self._update_measurement_controls_state()
+        # Оповещаем MainWindow об изменении состояния данных
+        self.measurement_state_changed.emit(self.current_volume_hu is not None, self._measurement_mode_active, len(self._measurements_by_slice.get(self.current_slice_index, [])) > 0)
+
+        # Устанавливаем фокус на ViewerPanel после загрузки данных
+        self.setFocus()
 
 
     def _update_slice_display(self, slice_index):
+        """
+        Обновляет отображение текущего среза, маски и измерений.
+        """
         if self.current_volume_hu is None: return
         if slice_index < 0 or slice_index >= self.current_volume_hu.shape[0]: return
 
-        # --- Исправлено: Логика обновления маски и чекбокса ---
+        # --- Скрываем измерения предыдущего среза перед обновлением ---
+        self._hide_measurements_on_slice(self.current_slice_index)
+        # -------------------------------------------------------------
+
         has_full_mask = self.full_segmentation_mask_volume is not None
         is_new_slice = slice_index != self.current_slice_index # Проверяем, изменился ли срез
 
@@ -755,7 +1042,7 @@ class ViewerPanel(QWidget):
             else: # На всякий случай, если индекс выходит за пределы
                 self.segmentation_mask = None
             # Чекбокс включается в _update_segmentation_controls_state
-            # self.segment_checkbox.setEnabled(True)
+            # self.segment_checkbox.setEnabled(True) # Это делается в _update_segmentation_controls_state
         elif is_new_slice:
             # Если полной маски нет И мы перешли на НОВЫЙ срез,
             # сбрасываем временную маску
@@ -767,7 +1054,15 @@ class ViewerPanel(QWidget):
         total_slices = self.current_volume_hu.shape[0]
         self.slice_label.setText(f"{slice_index + 1}/{total_slices}")
         self.slice_changed.emit(slice_index)
-        # -------------------------------------------------------
+
+        # --- Отображаем измерения для текущего среза ---
+        self._show_measurements_on_slice(self.current_slice_index)
+        # ---------------------------------------------
+
+        # --- Обновляем состояние действий измерения ---
+        self._update_measurement_controls_state()
+        # ---------------------------------------------
+
 
     @pyqtSlot(int)
     def _on_slice_changed(self, value):
@@ -789,94 +1084,6 @@ class ViewerPanel(QWidget):
         """ Обработчик переключения чекбокса отображения сегментации. """
         # Просто обновляем оверлей на основе нового состояния чекбокса
         self._update_mask_overlay()
-
-    @pyqtSlot()
-    def run_single_slice_segmentation(self):
-        """ Запускает сегментацию только для текущего среза. """
-        # Проверка доступности сегментации
-        if not self._check_segmentation_prerequisites(): return
-
-        logger.info(f"Запуск сегментации для среза {self.current_slice_index + 1}...")
-        self.segmentation_status_update.emit(f"Сегментация среза {self.current_slice_index + 1}...")
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            # Сбрасываем полную маску, так как результат будет только для одного среза
-            self.full_segmentation_mask_volume = None
-            # Деактивируем чекбокс полной маски
-            # self.segment_checkbox.setEnabled(False) # Это делается в _update_segmentation_controls_state
-
-            # Выполняем предсказание
-            single_mask = self.segmenter.predict(self.current_pixel_data_hu)
-
-            if single_mask is not None:
-                logger.info("Сегментация среза завершена успешно.")
-                # Сохраняем маску для текущего среза
-                self.segmentation_mask = single_mask
-                # Активируем и включаем чекбокс отображения текущей маски
-                self.segment_checkbox.setEnabled(True)
-                self.segment_checkbox.setChecked(True)
-                self._update_mask_overlay() # Отображаем маску
-                self.segmentation_status_update.emit(f"Сегментация среза {self.current_slice_index + 1} завершена.")
-            else:
-                logger.error("Сегментация среза не удалась.")
-                QMessageBox.critical(self, "Ошибка сегментации", "Не удалось выполнить сегментацию среза.")
-                # Сбрасываем маску и деактивируем чекбокс
-                self.segmentation_mask = None
-                self.segment_checkbox.setEnabled(False)
-                self.segment_checkbox.setChecked(False)
-                self._update_mask_overlay() # Скрываем оверлей
-                self.segmentation_status_update.emit("Ошибка сегментации среза.")
-        except Exception as e:
-             logger.error(f"Исключение при сегментации среза: {e}", exc_info=True)
-             QMessageBox.critical(self, "Ошибка сегментации", f"Произошла ошибка при сегментации среза:\n{str(e)}")
-             self.segmentation_mask = None
-             self.segment_checkbox.setEnabled(False)
-             self.segment_checkbox.setChecked(False)
-             self._update_mask_overlay()
-             self.segmentation_status_update.emit("Ошибка сегментации среза.")
-        finally:
-            QApplication.restoreOverrideCursor()
-            # Обновляем состояние кнопок после завершения (успеха или ошибки)
-            self._update_segmentation_controls_state()
-
-
-    @pyqtSlot()
-    def start_full_segmentation(self):
-        """ Запускает сегментацию всего объема в фоновом потоке. """
-        # Проверка доступности сегментации
-        if not self._check_segmentation_prerequisites(): return
-        if self.segmentation_thread is not None and self.segmentation_thread.isRunning():
-            QMessageBox.information(self, "Сегментация", "Сегментация всего объема уже запущена.")
-            return
-
-        logger.info("Запуск сегментации всего объема...")
-        self.segmentation_status_update.emit("Сегментация всего объема...")
-        self._set_segmentation_controls_enabled(False) # Отключаем кнопки во время процесса
-
-        num_slices = self.current_volume_hu.shape[0] if self.current_volume_hu is not None else 0
-        parent_widget = self.parent() if self.parent() else self
-        self.progress_dialog = QProgressDialog("Сегментация всего объема...", "Отмена", 0, num_slices, parent_widget)
-        self.progress_dialog.setWindowModality(Qt.WindowModal)
-        self.progress_dialog.setMinimumDuration(1000) # Показываем диалог только если процесс занимает > 1 сек
-        self.progress_dialog.setAutoReset(True)
-        self.progress_dialog.setAutoClose(True)
-        self.progress_dialog.setValue(0)
-        self.progress_dialog.canceled.connect(self.cancel_segmentation)
-        self.progress_dialog.show()
-
-        self.segmentation_thread = QThread(self)
-        self.segmentation_worker = SegmentationWorker(self.segmenter, self.current_volume_hu)
-        self.segmentation_worker.moveToThread(self.segmentation_thread)
-        self.segmentation_worker.progress.connect(self._on_full_segmentation_progress)
-        self.segmentation_worker.finished.connect(self._on_full_segmentation_finished)
-        self.segmentation_worker.error.connect(self._on_segmentation_error)
-        self.segmentation_thread.started.connect(self.segmentation_worker.run)
-        # Подключаем finished потока для очистки ссылок
-        self.segmentation_thread.finished.connect(self.segmentation_thread.deleteLater)
-        self.segmentation_worker.finished.connect(self.segmentation_worker.deleteLater)
-        # Подключаем finished потока к _clear_segmentation_thread_refs
-        self.segmentation_thread.finished.connect(self._clear_segmentation_thread_refs)
-        self.segmentation_thread.start()
 
     def _check_segmentation_prerequisites(self):
         """ Проверяет, доступны ли условия для выполнения сегментации. """
@@ -905,23 +1112,20 @@ class ViewerPanel(QWidget):
         model_is_loaded = SEGMENTATION_AVAILABLE and self.segmenter is not None and self.segmenter.model is not None
         data_is_loaded = self.current_volume_hu is not None
         full_mask_is_available = self.full_segmentation_mask_volume is not None
+        single_mask_is_available = self.segmentation_mask is not None
 
         # Кнопки "Сегм. срез" и "Сегм. весь объем" активны, если есть модель И данные
         self.run_segment_btn.setEnabled(model_is_loaded and data_is_loaded)
         self.run_full_segment_btn.setEnabled(model_is_loaded and data_is_loaded)
 
-        # Чекбокс "Показать сегментацию" активен, если доступна полная маска ИЛИ
-        # если есть временная маска для одного среза (self.segmentation_mask)
-        # Но мы хотим, чтобы чекбокс управлял только видимостью полной маски.
-        # Временная маска среза отображается автоматически после single_slice_segmentation.
-        # Поэтому чекбокс активен только при наличии полной маски.
-        self.segment_checkbox.setEnabled(full_mask_is_available)
+        # Чекбокс "Показать сегментацию" активен, если доступна полная маска ИЛИ временная маска среза
+        self.segment_checkbox.setEnabled(full_mask_is_available or single_mask_is_available)
 
         # Если чекбокс деактивируется (например, при смене серии или сбросе),
         # снимаем с него галочку и скрываем оверлей.
         if not self.segment_checkbox.isEnabled():
              self.segment_checkbox.setChecked(False)
-             self._update_mask_overlay() # Убедимся, что маска скрыта
+             # _update_mask_overlay() будет вызван при сбросе или смене среза
 
 
     @pyqtSlot(int, int)
@@ -1067,12 +1271,23 @@ class ViewerPanel(QWidget):
 
     def _update_mask_overlay(self):
         """ Обновляет отображение маски сегментации. """
-        # Маска отображается, если доступна ПОЛНАЯ маска И чекбокс включен
-        if self.full_segmentation_mask_volume is not None and self.segment_checkbox.isChecked():
-            # Берем срез из полной маски, соответствующий текущему срезу изображения
-            if self.current_slice_index < self.full_segmentation_mask_volume.shape[0]:
-                 mask_slice_to_display = self.full_segmentation_mask_volume[self.current_slice_index]
-                 self.mask_item.setImage(mask_slice_to_display.T, autoLevels=False, levels=(0, 1)) # Транспонируем
+        # ИСПРАВЛЕНО: Проверяем self.full_segmentation_mask_volume явно на None
+        if (self.full_segmentation_mask_volume is not None and self.segment_checkbox.isChecked()) or \
+           (self.segmentation_mask is not None and self.full_segmentation_mask_volume is None): # Отображаем временную маску, если нет полной
+            mask_to_display = None
+            if self.full_segmentation_mask_volume is not None and self.segment_checkbox.isChecked():
+                 # Берем срез из полной маски
+                 if self.current_slice_index < self.full_segmentation_mask_volume.shape[0]:
+                      mask_to_display = self.full_segmentation_mask_volume[self.current_slice_index]
+                 else:
+                      logger.warning(f"Индекс среза {self.current_slice_index} вне диапазона полной маски {self.full_segmentation_mask_volume.shape[0]}. Полная маска не отображена.")
+            elif self.segmentation_mask is not None and self.full_segmentation_mask_volume is None:
+                 # Используем временную маску среза, если нет полной маски
+                 mask_to_display = self.segmentation_mask
+
+
+            if mask_to_display is not None:
+                 self.mask_item.setImage(mask_to_display.T, autoLevels=False, levels=(0, 1)) # Транспонируем
                  self.mask_item.setVisible(True)
                  # Убеждаемся, что маска выравнивается с изображением
                  img_bounds = self.img_item.boundingRect()
@@ -1080,32 +1295,15 @@ class ViewerPanel(QWidget):
                      self.mask_item.setPos(img_bounds.topLeft())
                      self.mask_item.setTransform(self.img_item.transform())
             else:
-                 # Если индекс среза вне диапазона полной маски
+                 # Если маска для отображения не определена
                  self.mask_item.clear()
                  self.mask_item.setVisible(False)
-                 logger.warning(f"Индекс среза {self.current_slice_index} вне диапазона полной маски {self.full_segmentation_mask_volume.shape[0]}. Маска не отображена.")
-
-        # Если есть временная маска для одного среза (после run_single_slice_segmentation)
-        # и нет полной маски, отображаем временную маску.
-        # Чекбокс "Показать сегментацию" при этом должен быть выключен/неактивен.
-        elif self.segmentation_mask is not None and self.full_segmentation_mask_volume is None:
-             self.mask_item.setImage(self.segmentation_mask.T, autoLevels=False, levels=(0, 1)) # Транспонируем
-             self.mask_item.setVisible(True)
-             # Убеждаемся, что маска выравнивается с изображением
-             img_bounds = self.img_item.boundingRect()
-             if img_bounds:
-                 self.mask_item.setPos(img_bounds.topLeft())
-                 self.mask_item.setTransform(self.img_item.transform())
-             # Убедимся, что чекбокс выключен, если отображается только временная маска
-             # self.segment_checkbox.setChecked(False) # Это может вызвать рекурсию
-             # Вместо этого, просто убедимся, что чекбокс не активен
-             # self.segment_checkbox.setEnabled(False) # Это делается в _update_segmentation_controls_state
-
 
         else:
-            # Скрываем маску, если нет данных полной маски И нет временной маски ИЛИ чекбокс выключен
+            # Скрываем маску, если нет данных полной маски И нет временной маски ИЛИ (есть полная маска, но чекбокс выключен)
             self.mask_item.clear()
             self.mask_item.setVisible(False)
+
 
     # Метод _set_segmentation_controls_enabled теперь используется только для временного
     # отключения кнопок во время выполнения сегментации объема.
@@ -1128,14 +1326,9 @@ class ViewerPanel(QWidget):
     # @pyqtSlot(QPointF) # Удален декоратор
     def _on_mouse_moved(self, pos):
         """
-        Обработчик движения мыши для отображения HU.
+        Обработчик движения мыши для отображения HU и обновления текущего измерения.
         Позиция 'pos' находится в координатах сцены (graphics_widget).
         """
-        # Проверяем, есть ли загруженные данные среза
-        if self.current_pixel_data_hu is None:
-            self.hu_label.setText("HU: N/A")
-            return
-
         # Преобразуем координаты сцены в координаты изображения
         # Используем mapFromScene для преобразования из координат сцены в координаты ImageItem
         pos_in_img_item = self.img_item.mapFromScene(pos)
@@ -1146,11 +1339,10 @@ class ViewerPanel(QWidget):
         y = int(pos_in_img_item.y())
 
         # Получаем размеры текущего среза (height, width)
-        height, width = self.current_pixel_data_hu.shape
+        height, width = self.current_pixel_data_hu.shape if self.current_pixel_data_hu is not None else (0, 0)
 
-        # Проверяем, находится ли курсор внутри границ изображения по индексам массива
-        # Учитываем, что y соответствует строкам (height), x - столбцам (width)
-        if 0 <= y < height and 0 <= x < width:
+        # --- Обновление HU Label ---
+        if self.current_pixel_data_hu is not None and 0 <= y < height and 0 <= x < width:
             try:
                 # Получаем значение HU из исходных данных по индексам [строка, столбец]
                 hu_value = self.current_pixel_data_hu[y, x]
@@ -1163,7 +1355,434 @@ class ViewerPanel(QWidget):
                  logger.error(f"Ошибка при получении значения HU: {e}")
                  self.hu_label.setText("HU: Ошибка")
         else:
-            # Если курсор вне изображения
+            # Если курсор вне изображения или нет данных
             self.hu_label.setText("HU: N/A (вне изображения)")
+        # ---------------------------
+
+        # --- Обновление текущего измерения (если активно) ---
+        if self._measurement_mode_active and self._measurement_start_point is not None and self._current_measurement_item is not None:
+            # Координаты текущей позиции мыши в системе координат ImageItem
+            # Используем координаты пикселя, чтобы привязаться к сетке изображения
+            end_point_data = QPointF(x, y)
+
+            # Обновляем конечную точку линии
+            self._current_measurement_item['line'].setData([self._measurement_start_point.x(), end_point_data.x()],
+                                                          [self._measurement_start_point.y(), end_point_data.y()])
+
+            # Рассчитываем и обновляем текст измерения
+            distance_mm = self._calculate_distance_mm(self._measurement_start_point, end_point_data)
+            self._current_measurement_item['text'].setHtml(f"<div style='text-align: center; color: white; background-color: rgba(0,0,0,100); padding: 2px;'>{distance_mm:.1f} mm</div>")
+
+            # Обновляем позицию текста (со сдвигом)
+            text_pos_x = (self._measurement_start_point.x() + end_point_data.x()) / 2.0
+            text_pos_y = (self._measurement_start_point.y() + end_point_data.y()) / 2.0
+            # Добавляем небольшой сдвиг к позиции текста
+            offset_x = 5 # Сдвиг по горизонтали в пикселях изображения
+            offset_y = 5 # Сдвиг по вертикали в пикселях изображения
+            self._current_measurement_item['text'].setPos(text_pos_x + offset_x, text_pos_y + offset_y)
+        # ----------------------------------------------------
 
 
+    @pyqtSlot(object) # Сигнал sigMouseClicked передает объект MouseClickEvent
+    def _on_view_box_clicked(self, event):
+        """
+        Обработчик кликов мыши в ViewBox для режима измерения и выбора измерений.
+        """
+        logger.debug(f"ViewBox clicked: button={event.button()}, pos={event.pos()}, scenePos={event.scenePos()}")
+
+        # Если клик правой кнопкой мыши, снимаем выделение и игнорируем дальнейшую обработку клика
+        if event.button() == Qt.RightButton:
+             logger.debug("Правый клик мыши.")
+             # Вызываем стандартный обработчик контекстного меню, который проверит наличие выбранного измерения
+             # Передаем QContextMenuEvent с правильными координатами
+             self.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Mouse, event.pos().toPoint(), event.globalPos()))
+             event.accept() # Принимаем событие, чтобы не мешать контекстному меню
+             return
+
+        # Проверяем, был ли клик левой кнопкой мыши
+        if event.button() != Qt.LeftButton:
+            # Если режим измерения активен, но клик не левой кнопкой,
+            # возможно, пользователь хочет отменить текущее измерение.
+            # Сбрасываем начальную точку и временный элемент измерения.
+            if self._measurement_mode_active and self._measurement_start_point is not None:
+                 logger.debug("Отмена текущего измерения (клик не левой кнопкой).")
+                 self._measurement_start_point = None
+                 if self._current_measurement_item:
+                      # Удаляем временные элементы с ViewBox
+                      self.view_box.removeItem(self._current_measurement_item['line'])
+                      self.view_box.removeItem(self._current_measurement_item['text'])
+                      self._current_measurement_item = None
+                 event.accept() # Принимаем событие, чтобы оно не обрабатывалось далее
+                 return
+
+            # Если режим измерения не активен, разрешаем стандартную обработку клика (если она была бы включена)
+            # Но мы отключили стандартную обработку в _init_ui, поэтому просто игнорируем
+            event.ignore() # Игнорируем, чтобы не было неожиданного поведения
+            return
+
+        # Получаем позицию клика в координатах сцены
+        click_pos_scene = event.scenePos()
+
+        # --- Логика для режима измерения (рисования) ---
+        if self._measurement_mode_active:
+            # Получаем позицию клика в координатах ImageItem
+            # Убедимся, что клик был внутри границ img_item
+            click_pos_data = self.img_item.mapFromScene(click_pos_scene)
+
+            # Получаем целочисленные координаты пикселя в системе координат ImageItem
+            x = int(click_pos_data.x())
+            y = int(click_pos_data.y())
+
+            # Проверяем, находится ли клик внутри границ изображения по индексам массива
+            height, width = self.current_pixel_data_hu.shape if self.current_pixel_data_hu is not None else (0, 0)
+            if not (0 <= y < height and 0 <= x < width):
+                 logger.debug("Клик вне границ изображения в режиме измерения.")
+                 # Если режим измерения активен, но клик вне изображения,
+                 # сбрасываем начальную точку и временный элемент измерения.
+                 if self._measurement_mode_active and self._measurement_start_point is not None:
+                      logger.debug("Отмена текущего измерения (клик вне изображения).")
+                      self._measurement_start_point = None
+                      if self._current_measurement_item:
+                           self.view_box.removeItem(self._current_measurement_item['line'])
+                           self.view_box.removeItem(self._current_measurement_item['text'])
+                           self._current_measurement_item = None
+                      # Снимаем выделение с любого выбранного измерения при выходе из режима рисования
+                      self._deselect_measurement()
+                      event.accept() # Принимаем событие
+                      return
+
+                 event.ignore() # Игнорируем, если нет данных или клик вне изображения
+                 return
+
+
+            # Если это первый клик, сохраняем начальную точку и создаем временные элементы
+            if self._measurement_start_point is None:
+                logger.debug(f"Начало измерения в ({x}, {y}) (пиксели изображения)")
+                self._measurement_start_point = QPointF(x, y)
+
+                # Создаем временную линию и текст для отображения в процессе рисования
+                # Линия будет обновляться в _on_mouse_moved
+                line_item = pg.PlotCurveItem([x, x], [y, y], pen=pg.mkPen('yellow', width=2))
+                text_item = pg.TextItem("0.0 mm", color='white', anchor=(0.5, 0.5)) # Текст по центру
+                text_item.setPos(x, y) # Начальная позиция текста
+
+                self.view_box.addItem(line_item)
+                self.view_box.addItem(text_item)
+
+                self._current_measurement_item = {'line': line_item, 'text': text_item}
+
+            # Если это второй клик, завершаем измерение
+            else:
+                logger.debug(f"Конец измерения в ({x}, {y}) (пиксели изображения)")
+                end_point = QPointF(x, y)
+
+                # Обновляем конечную точку временной линии
+                self._current_measurement_item['line'].setData([self._measurement_start_point.x(), end_point.x()],
+                                                              [self._measurement_start_point.y(), end_point.y()])
+
+                # Рассчитываем окончательное расстояние
+                distance_mm = self._calculate_distance_mm(self._measurement_start_point, end_point)
+                logger.info(f"Измерение завершено. Расстояние: {distance_mm:.2f} mm")
+
+                # Обновляем текст с окончательным значением
+                self._current_measurement_item['text'].setHtml(f"<div style='text-align: center; color: white; background-color: rgba(0,0,0,100); padding: 2px;'>{distance_mm:.1f} mm</div>")
+
+                # Обновляем позицию текста (со сдвигом)
+                text_pos_x = (self._measurement_start_point.x() + end_point.x()) / 2.0
+                text_pos_y = (self._measurement_start_point.y() + end_point.y()) / 2.0
+                # Добавляем небольшой сдвиг к позиции текста
+                offset_x = 5 # Сдвиг по горизонтали в пикселях изображения
+                offset_y = 5 # Сдвиг по вертикали в пикселях изображения
+                self._current_measurement_item['text'].setPos(text_pos_x + offset_x, text_pos_y + offset_y)
+
+
+                # Сохраняем завершенное измерение в списке для текущего среза
+                if self.current_slice_index not in self._measurements_by_slice:
+                     self._measurements_by_slice[self.current_slice_index] = []
+                self._measurements_by_slice[self.current_slice_index].append(self._current_measurement_item)
+                logger.debug(f"Измерение сохранено для среза {self.current_slice_index}. Всего на срезе: {len(self._measurements_by_slice[self.current_slice_index])}")
+
+
+                # Сбрасываем переменные для нового измерения
+                self._measurement_start_point = None
+                self._current_measurement_item = None
+
+                # После завершения рисования, выходим из режима рисования
+                self.toggle_measurement_mode(False) # Выключаем режим рисования
+
+                # Обновляем состояние кнопки очистки измерений
+                self._update_measurement_controls_state()
+
+            event.accept() # Принимаем событие, чтобы оно не обрабатывалось далее
+        # ----------------------------------------------------------------------
+
+        # --- Логика для выбора измерения (если режим рисования НЕ активен) ---
+        # Эта логика теперь выполняется только если _measurement_mode_active == False
+        else:
+            # Получаем список элементов сцены под курсором
+            items_at_pos = self.view_box.scene().items(click_pos_scene)
+            logger.debug(f"Items at click position: {items_at_pos}")
+
+            selected_measurement = None
+            # Проходим по всем элементам под курсором
+            for item in items_at_pos:
+                 # Проверяем, является ли элемент линией измерения из нашего списка
+                 # Ищем в измерениях текущего среза
+                 current_slice_measurements = self._measurements_by_slice.get(self.current_slice_index, [])
+                 for measurement in current_slice_measurements:
+                      if item == measurement['line']:
+                           selected_measurement = measurement
+                           break # Нашли совпадение, выбираем его
+                 if selected_measurement:
+                      break # Прекращаем поиск по элементам, если измерение найдено
+
+            # Снимаем выделение с предыдущего, если оно было
+            self._deselect_measurement()
+
+            # Если нашли измерение под кликом, выделяем его
+            if selected_measurement:
+                 logger.debug("Выбрано измерение для удаления.")
+                 self._selected_measurement_item = selected_measurement
+                 # Визуально выделяем линию (например, меняем цвет или толщину)
+                 self._selected_measurement_item['line'].setPen(pg.mkPen('cyan', width=3)) # Выделяем синим цветом
+                 # Устанавливаем фокус на ViewerPanel, чтобы событие Delete было перехвачено
+                 self.setFocus()
+                 event.accept() # Принимаем событие
+            else:
+                 # Если клик не попал по измерению, просто снимаем выделение
+                 logger.debug("Клик не попал по измерению.")
+                 # Фокус остается на ViewerPanel, если он был установлен ранее
+                 event.ignore() # Игнорируем, чтобы ViewBox мог обработать (если бы было включено панорамирование)
+            return # Завершаем обработку клика, если режим измерения не активен
+
+
+    def _on_measurement_hover(self, event, measurement_item):
+        """ Обработчик наведения мыши на линию измерения. """
+        # Можно добавить визуальный эффект при наведении, например, изменение цвета
+        # logger.debug(f"Hover event on measurement: isExit={event.isExit()}")
+        if event.isEnter():
+            # measurement_item['line'].setPen(pg.mkPen('blue', width=2)) # Пример: меняем цвет при наведении
+            pass # Пока без визуального эффекта при наведении
+        elif event.isExit():
+            # Если это не выбранное измерение, возвращаем исходный цвет
+            # if measurement_item != self._selected_measurement_item:
+            #      measurement_item['line'].setPen(pg.mkPen('yellow', width=2))
+            pass # Пока без визуального эффекта при уходе курсора
+
+
+    def _deselect_measurement(self):
+        """ Снимает выделение с текущего выбранного измерения. """
+        if self._selected_measurement_item:
+            logger.debug("Снятие выделения с измерения.")
+            # Возвращаем линии исходный вид
+            self._selected_measurement_item['line'].setPen(pg.mkPen('yellow', width=2))
+            self._selected_measurement_item = None
+            # Обновляем состояние кнопки очистки измерений (хотя она всегда активна, если есть измерения)
+            self._update_measurement_controls_state()
+
+
+    def _delete_selected_measurement(self):
+        """ Удаляет текущее выбранное измерение. """
+        logger.debug("Попытка удаления выбранного измерения.")
+        if self._selected_measurement_item:
+            logger.info("Удаление выбранного измерения.")
+            try:
+                # Удаляем элементы с ViewBox
+                self.view_box.removeItem(self._selected_measurement_item['line'])
+                self.view_box.removeItem(self._selected_measurement_item['text'])
+                logger.debug("Элементы измерения удалены из ViewBox.")
+
+                # Удаляем из списка измерений для текущего среза
+                current_slice_measurements = self._measurements_by_slice.get(self.current_slice_index, [])
+                index_to_remove = -1
+                for i, measurement in enumerate(current_slice_measurements):
+                     # Сравниваем по ссылке на словарь или по ссылкам на графические элементы внутри
+                     if measurement == self._selected_measurement_item:
+                          index_to_remove = i
+                          break
+                if index_to_remove != -1:
+                     del current_slice_measurements[index_to_remove]
+                     # Обновляем список измерений для среза в словаре
+                     self._measurements_by_slice[self.current_slice_index] = current_slice_measurements
+                     logger.debug(f"Измерение успешно удалено из списка для среза {self.current_slice_index}. Осталось: {len(current_slice_measurements)}")
+                else:
+                     logger.warning("Попытка удалить измерение, которое не найдено в списке для текущего среза.")
+
+
+            except Exception as e:
+                logger.error(f"Ошибка при удалении измерения: {e}", exc_info=True)
+            finally:
+                # Сбрасываем выбранное измерение
+                self._selected_measurement_item = None
+                # Обновляем состояние кнопки очистки измерений
+                self._update_measurement_controls_state()
+        else:
+            logger.debug("Нет выбранного измерения для удаления.")
+
+
+    def _calculate_distance_mm(self, point1: QPointF, point2: QPointF):
+        """
+        Рассчитывает расстояние между двумя точками в миллиметрах,
+        используя Pixel Spacing.
+        Точки должны быть в координатах изображения (пикселях).
+        """
+        # Разница в пикселях
+        delta_x_pixels = point2.x() - point1.x()
+        delta_y_pixels = point2.y() - point1.y()
+
+        # Pixel Spacing: (row_spacing, col_spacing)
+        # delta_y_pixels соответствует row_spacing, delta_x_pixels - col_spacing
+        row_spacing, col_spacing = self.pixel_spacing
+
+        # --- Добавляем логирование для проверки значений ---
+        logger.debug(f"Calculating distance: Point1=({point1.x()}, {point1.y()}), Point2=({point2.x()}, {point2.y()})")
+        logger.debug(f"Pixel differences: delta_x={delta_x_pixels}, delta_y={delta_y_pixels}")
+        logger.debug(f"Pixel Spacing used: row_spacing={row_spacing}, col_spacing={col_spacing}")
+        # ----------------------------------------------------
+
+
+        # Разница в миллиметрах
+        delta_x_mm = delta_x_pixels * col_spacing
+        delta_y_mm = delta_y_pixels * row_spacing
+
+        # Расстояние по теореме Пифагора
+        distance_mm = math.sqrt(delta_x_mm**2 + delta_y_mm**2)
+
+        return distance_mm
+
+
+    # --- Добавлен публичный метод для переключения режима измерения ---
+    @pyqtSlot(bool)
+    def toggle_measurement_mode(self, active: bool):
+        """
+        Публичный метод для установки режима измерения (рисования).
+        Вызывается из MainWindow действием "Начать измерение".
+        """
+        # Если режим уже в нужном состоянии, ничего не делаем
+        if self._measurement_mode_active == active:
+             return
+
+        self._measurement_mode_active = active
+
+        if active:
+            logger.info("Режим рисования измерения активирован.")
+            QApplication.setOverrideCursor(Qt.CrossCursor) # Меняем курсор на перекрестие
+            # Отключаем стандартное панорамирование ViewBox
+            self.view_box.setMouseEnabled(x=False, y=False)
+            # Сбрасываем начальную точку и временный элемент на всякий случай
+            self._measurement_start_point = None
+            if self._current_measurement_item:
+                 self.view_box.removeItem(self._current_measurement_item['line'])
+                 self.view_box.removeItem(self._current_measurement_item['text'])
+                 self._current_measurement_item = None
+            # Снимаем выделение с любого выбранного измерения при входе в режим рисования
+            self._deselect_measurement()
+
+
+        else:
+            logger.info("Режим рисования измерения деактивирован.")
+            QApplication.restoreOverrideCursor() # Восстанавливаем стандартный курсор
+            # Включаем стандартное панорамирование ViewBox
+            self.view_box.setMouseEnabled(x=True, y=True)
+            # Сбрасываем начальную точку и временный элемент, если они остались
+            self._measurement_start_point = None
+            if self._current_measurement_item:
+                 self.view_box.removeItem(self._current_measurement_item['line'])
+                 self.view_box.removeItem(self._current_measurement_item['text'])
+                 self._current_measurement_item = None
+            # Снимаем выделение с любого выбранного измерения при выходе из режима рисования
+            self._deselect_measurement()
+
+
+        # Обновляем состояние кнопки очистки измерений
+        self._update_measurement_controls_state()
+        # Оповещаем MainWindow об изменении состояния режима
+        self.measurement_state_changed.emit(self.current_volume_hu is not None, self._measurement_mode_active, len(self._measurements_by_slice.get(self.current_slice_index, [])) > 0)
+
+    # --- Удален метод _on_measure_toggle т.к. логика перенесена в toggle_measurement_mode ---
+    # @pyqtSlot(bool)
+    # def _on_measure_toggle(self, checked):
+    #     """ Обработчик переключения кнопки режима измерения. """
+    #     self._set_measurement_mode(checked)
+    # ----------------------------------------------------------------------------------------
+
+    # --- Удален метод _set_measurement_mode т.к. логика перенесена в toggle_measurement_mode ---
+    # def _set_measurement_mode(self, active: bool):
+    #     """
+    #     Устанавливает режим измерения.
+    #     Включает/отключает обработку кликов для измерения
+    #     и восстанавливает/отключает стандартное панорамирование ViewBox.
+    #     """
+    #     self._measurement_mode_active = active
+    #     self.measure_btn.setChecked(active) # Синхронизируем состояние кнопки
+    #     ...
+    # ------------------------------------------------------------------------------------------
+
+
+    @pyqtSlot()
+    def _clear_measurements_on_slice(self, slice_index: int):
+        """ Удаляет все измерения с указанного среза с ViewBox и очищает список для этого среза. """
+        logger.info(f"Очистка измерений на срезе {slice_index}.")
+        measurements_to_clear = self._measurements_by_slice.get(slice_index, [])
+        for measurement in measurements_to_clear:
+             # Проверяем, что элементы еще существуют в ViewBox перед удалением
+             if measurement['line'] in self.view_box.addedItems:
+                  self.view_box.removeItem(measurement['line'])
+             if measurement['text'] in self.view_box.addedItems:
+                  self.view_box.removeItem(measurement['text'])
+
+        # Удаляем список измерений для этого среза из словаря
+        if slice_index in self._measurements_by_slice:
+             del self._measurements_by_slice[slice_index]
+             logger.debug(f"Измерения для среза {slice_index} удалены из словаря.")
+
+        # Если очищается текущий срез, сбрасываем выбранное измерение
+        if slice_index == self.current_slice_index:
+             self._selected_measurement_item = None
+
+        # Обновляем состояние кнопки очистки измерений (для текущего среза)
+        self._update_measurement_controls_state()
+
+
+    @pyqtSlot()
+    def clear_all_measurements(self):
+        """ Публичный слот для очистки всех измерений на текущем срезе. """
+        self._clear_measurements_on_slice(self.current_slice_index)
+        logger.info("Вызван публичный метод clear_all_measurements для текущего среза.")
+
+
+    def _hide_measurements_on_slice(self, slice_index: int):
+        """ Скрывает измерения на указанном срезе. """
+        measurements_to_hide = self._measurements_by_slice.get(slice_index, [])
+        for measurement in measurements_to_hide:
+             # Проверяем, что элементы еще существуют в ViewBox перед скрытием
+             if measurement['line'] in self.view_box.addedItems:
+                  measurement['line'].setVisible(False)
+             if measurement['text'] in self.view_box.addedItems:
+                  measurement['text'].setVisible(False)
+        logger.debug(f"Измерения на срезе {slice_index} скрыты.")
+
+    def _show_measurements_on_slice(self, slice_index: int):
+        """ Отображает измерения на указанном срезе. """
+        measurements_to_show = self._measurements_by_slice.get(slice_index, [])
+        for measurement in measurements_to_show:
+             # Проверяем, что элементы еще существуют в ViewBox перед отображением
+             if measurement['line'] in self.view_box.addedItems:
+                  measurement['line'].setVisible(True)
+             if measurement['text'] in self.view_box.addedItems:
+                  measurement['text'].setVisible(True)
+        logger.debug(f"Измерения на срезе {slice_index} отображены. Количество: {len(measurements_to_show)}")
+
+
+    def _update_measurement_controls_state(self):
+        """ Обновляет состояние кнопки очистки измерений. """
+        # Кнопка очистки активна, если есть хотя бы одно сохраненное измерение на текущем срезе ИЛИ активен временный элемент
+        has_measurements_on_current_slice = len(self._measurements_by_slice.get(self.current_slice_index, [])) > 0 or self._current_measurement_item is not None
+        # self.clear_measurements_btn.setEnabled(has_measurements_on_current_slice) # Кнопка удалена
+
+        # Кнопка измерения (действие в MainWindow) активно, если загружены данные серии
+        data_is_loaded = self.current_volume_hu is not None
+        # Состояние действия "Измерение" (открывает подменю) активно, если загружены данные
+        # Состояние действия "Начать измерение" активно, если загружены данные И режим рисования НЕ активен
+        # Состояние действия "Очистить все измерения" активно, если загружены данные И есть измерения на текущем срезе
+        self.measurement_state_changed.emit(data_is_loaded, self._measurement_mode_active, has_measurements_on_current_slice)

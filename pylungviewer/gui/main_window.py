@@ -12,7 +12,7 @@ from PyQt5.QtWidgets import (
     QMainWindow, QDockWidget, QAction, QToolBar,
     QSplitter, QFileDialog, QMessageBox, QLabel,
     QStatusBar, QVBoxLayout, QWidget, QProgressBar,
-    QApplication
+    QApplication, QMenu # Импортируем QMenu
 )
 from PyQt5.QtCore import Qt, QSettings, QSize, pyqtSlot, QTimer
 from PyQt5.QtGui import QIcon
@@ -66,6 +66,10 @@ class MainWindow(QMainWindow):
         # Подключаем сигнал из ViewerPanel об успешной загрузке модели
         self.viewer_panel.model_loaded_status.connect(self._on_model_loaded_status)
 
+        # Подключаем сигнал от ViewerPanel о необходимости обновления состояния действий измерения
+        # Сигнал теперь передает 3 параметра: (данные загружены, режим рисования активен, есть ли измерения)
+        self.viewer_panel.measurement_state_changed.connect(self._update_measurement_actions_state)
+
 
         self.central_widget.addWidget(self.sidebar_panel)
         self.central_widget.addWidget(self.viewer_panel)
@@ -82,6 +86,11 @@ class MainWindow(QMainWindow):
         self.progress_bar.setMaximumWidth(200)
         self.progress_bar.setVisible(False)
         self.status_bar.addPermanentWidget(self.progress_bar)
+
+        # Устанавливаем фокус на viewer_panel, чтобы он мог получать события клавиатуры
+        self.viewer_panel.setFocusPolicy(Qt.StrongFocus)
+        self.viewer_panel.setFocus()
+
 
     def _create_actions(self):
         # --- Файловые действия ---
@@ -112,7 +121,31 @@ class MainWindow(QMainWindow):
         self.reset_view_action.setShortcut("Ctrl+0")
         self.reset_view_action.triggered.connect(self._on_reset_view)
 
-        # --- Действия для инструментов ---
+        # --- Действие для инструмента измерения (открывает подменю) ---
+        self.measure_action = QAction("Измерение", self)
+        self.measure_action.setStatusTip("Инструменты измерения расстояний")
+        # Это действие теперь не переключаемое и не запускает рисование напрямую
+        self.measure_action.setCheckable(False)
+        self.measure_action.setEnabled(False) # Изначально выключено
+        # -------------------------------------------------------------
+
+        # --- Новое действие для начала рисования измерения ---
+        self.start_drawing_action = QAction("Начать измерение", self)
+        self.start_drawing_action.setStatusTip("Начать рисование линии измерения")
+        self.start_drawing_action.triggered.connect(self._on_start_drawing)
+        self.start_drawing_action.setEnabled(False) # Изначально выключено
+        # ----------------------------------------------------
+
+        # --- Действие для очистки всех измерений ---
+        self.clear_all_measurements_action = QAction("Очистить все измерения", self)
+        self.clear_all_measurements_action.setStatusTip("Удалить все измерения на текущем срезе")
+        self.clear_all_measurements_action.triggered.connect(self._on_clear_all_measurements)
+        # Состояние этой кнопки будет зависеть от наличия измерений, управляется из ViewerPanel
+        self.clear_all_measurements_action.setEnabled(False)
+        # ------------------------------------------
+
+
+        # --- Действия для инструментов сегментации ---
         self.segment_slice_action = QAction("Сегм. срез", self)
         self.segment_slice_action.setStatusTip("Выполнить сегментацию только для текущего среза")
         self.segment_slice_action.triggered.connect(self._on_segment_slice)
@@ -134,7 +167,7 @@ class MainWindow(QMainWindow):
     def _create_menus(self):
         self.file_menu = self.menuBar().addMenu("Файл")
         self.file_menu.addAction(self.import_action)
-        # Удаляем действие "Загрузить модель" из меню
+        # Удаляем действие "Загрузить модель", т.к. она будет загружаться автоматически
         # self.file_menu.addAction(self.load_model_action)
         self.file_menu.addSeparator()
         self.file_menu.addAction(self.exit_action)
@@ -145,6 +178,16 @@ class MainWindow(QMainWindow):
         self.view_menu.addAction(self.reset_view_action)
 
         self.tools_menu = self.menuBar().addMenu("Инструменты")
+        # Создаем подменю для измерения
+        self.measure_menu = QMenu("Измерение", self)
+        self.measure_action.setMenu(self.measure_menu) # Прикрепляем подменю к действию
+        self.tools_menu.addAction(self.measure_action) # Добавляем действие измерения (с подменю) в меню Инструменты
+
+        # Добавляем действия в подменю Измерение
+        self.measure_menu.addAction(self.start_drawing_action) # Действие для начала рисования
+        self.measure_menu.addAction(self.clear_all_measurements_action) # Действие очистки
+
+        self.tools_menu.addSeparator()
         self.tools_menu.addAction(self.segment_slice_action)
         self.tools_menu.addAction(self.segment_volume_action)
 
@@ -165,6 +208,8 @@ class MainWindow(QMainWindow):
         self.main_toolbar.addAction(self.zoom_in_action)
         self.main_toolbar.addAction(self.zoom_out_action)
         self.main_toolbar.addAction(self.reset_view_action)
+        self.main_toolbar.addSeparator()
+        self.main_toolbar.addAction(self.measure_action) # Добавляем действие измерения (с подменю) на панель инструментов
         self.main_toolbar.addSeparator()
         self.main_toolbar.addAction(self.segment_slice_action)
         self.main_toolbar.addAction(self.segment_volume_action)
@@ -208,12 +253,20 @@ class MainWindow(QMainWindow):
                     self.progress_bar.setVisible(True)
                     self._update_status_bar("Загрузка DICOM файлов...")
                     self.dicom_loader.clear_cache()
+                    # Отключаем действия измерения во время загрузки
+                    self.measure_action.setEnabled(False)
+                    self.start_drawing_action.setEnabled(False)
+                    self.clear_all_measurements_action.setEnabled(False)
                     QTimer.singleShot(50, lambda: self.dicom_loader.load_files(selected_files, recursive_search))
         except Exception as e:
             logger.error(f"Ошибка при импорте DICOM: {e}", exc_info=True)
             QMessageBox.critical(self, "Ошибка импорта", f"Произошла ошибка: {str(e)}")
             self._update_status_bar("Ошибка при импорте DICOM")
             self.progress_bar.setVisible(False)
+            # Включаем действия измерения обратно после ошибки загрузки
+            # Состояние будет обновлено через сигнал от ViewerPanel при сбросе
+            # self._update_measurement_actions_state()
+
 
     # Удаляем метод _on_load_model, т.к. загрузка модели теперь автоматическая
     # def _on_load_model(self):
@@ -260,9 +313,11 @@ class MainWindow(QMainWindow):
         self.progress_bar.setMaximum(100)
         self._update_status_bar(f"Загружено {len(studies)} исследований")
         self.sidebar_panel.set_studies(studies)
-        self.viewer_panel._show_placeholder()
+        self.viewer_panel._show_placeholder() # _show_placeholder испускает measurement_state_changed
         # Обновляем состояние кнопок сегментации после загрузки данных
         self._update_segmentation_actions_state()
+        # Состояние действий измерения обновится по сигналу от ViewerPanel
+        # self._update_measurement_actions_state() # Удаляем прямой вызов
         logger.info(f"Загружено {len(studies)} исследований")
 
     @pyqtSlot(str)
@@ -270,13 +325,20 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         QMessageBox.critical(self, "Ошибка импорта", error_message)
         self._update_status_bar("Ошибка при импорте DICOM")
+        # Включаем действия измерения обратно после ошибки загрузки
+        # Состояние обновится по сигналу от ViewerPanel при сбросе
+        # self._update_measurement_actions_state() # Удаляем прямой вызов
+
 
     @pyqtSlot(object)
     def _on_series_selected(self, series_data):
         logger.info(f"Выбрана серия для отображения: {series_data.get('description', 'Неизвестно')}")
-        self.viewer_panel.load_series(series_data)
+        self.viewer_panel.load_series(series_data) # load_series испускает measurement_state_changed
         # Обновляем состояние кнопок сегментации после выбора серии
         self._update_segmentation_actions_state()
+        # Состояние действий измерения обновится по сигналу от ViewerPanel
+        # self._update_measurement_actions_state() # Удаляем прямой вызов
+
 
     def _update_segmentation_actions_state(self):
         """
@@ -294,6 +356,54 @@ class MainWindow(QMainWindow):
         self.segment_volume_action.setEnabled(can_segment)
         # Состояние чекбокса "Показать сегментацию" управляется внутри ViewerPanel
         # self.viewer_panel.segment_checkbox.setEnabled(...)
+
+
+    # Удаляем слот _on_measure_action_toggle, т.к. measure_action больше не переключаемая
+    # @pyqtSlot(bool)
+    # def _on_measure_action_toggle(self, checked):
+    #     ...
+
+    @pyqtSlot()
+    def _on_start_drawing(self):
+        """
+        Обрабатывает действие "Начать измерение" из подменю.
+        Вызывает метод в ViewerPanel для активации режима рисования.
+        """
+        if hasattr(self.viewer_panel, 'toggle_measurement_mode'):
+             # Передаем True, чтобы активировать режим рисования
+             self.viewer_panel.toggle_measurement_mode(True)
+             logger.debug("Запрошена активация режима рисования измерения.")
+        else:
+             logger.warning("Попытка активировать режим рисования, но функция toggle_measurement_mode недоступна.")
+
+
+    @pyqtSlot(bool, bool, bool) # Обновленная сигнатура слота
+    def _update_measurement_actions_state(self, data_loaded: bool, drawing_mode_active: bool, has_measurements: bool):
+        """
+        Обновляет состояние действий измерения на тулбаре/в меню.
+        Вызывается из ViewerPanel при изменении состояния данных, режима рисования или наличии измерений.
+        """
+        # Действие "Измерение" (открывает подменю) активно, если загружены данные
+        self.measure_action.setEnabled(data_loaded)
+
+        # Действие "Начать измерение" активно, если загружены данные И режим рисования НЕ активен
+        self.start_drawing_action.setEnabled(data_loaded and not drawing_mode_active)
+
+        # Действие "Очистить все измерения" активно, если загружены данные И есть измерения
+        self.clear_all_measurements_action.setEnabled(data_loaded and has_measurements)
+
+
+    @pyqtSlot()
+    def _on_clear_all_measurements(self):
+        """
+        Обрабатывает действие "Очистить все измерения".
+        Вызывает соответствующий метод в ViewerPanel.
+        """
+        if hasattr(self.viewer_panel, 'clear_all_measurements'):
+             self.viewer_panel.clear_all_measurements()
+             logger.debug("Запрошена очистка всех измерений.")
+        else:
+             logger.warning("Попытка очистить измерения, но функция clear_all_measurements недоступна.")
 
 
     def _on_zoom_in(self):
@@ -391,6 +501,8 @@ class MainWindow(QMainWindow):
                   logger.info("Удалено текущее исследование, сбрасываем ViewerPanel.")
                   self.viewer_panel.load_series(None) # Сброс ViewerPanel
                   self._update_segmentation_actions_state()
+                  # Состояние действий измерения обновится по сигналу от ViewerPanel
+                  # self._update_measurement_actions_state() # Удаляем прямой вызов
 
 
     def closeEvent(self, event):
@@ -417,4 +529,3 @@ class MainWindow(QMainWindow):
 
         self._save_window_settings()
         super().closeEvent(event)
-
