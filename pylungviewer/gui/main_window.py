@@ -1,5 +1,4 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
+
 
 """
 Главное окно приложения PyLungViewer.
@@ -12,12 +11,11 @@ from PyQt5.QtWidgets import (
     QMainWindow, QDockWidget, QAction, QToolBar,
     QSplitter, QFileDialog, QMessageBox, QLabel,
     QStatusBar, QVBoxLayout, QWidget, QProgressBar,
-    QApplication, QMenu # Импортируем QMenu
+    QApplication, QMenu 
 )
 from PyQt5.QtCore import Qt, QSettings, QSize, pyqtSlot, QTimer
 from PyQt5.QtGui import QIcon
 
-# Импорт модулей приложения
 from pylungviewer.gui.viewer_panel import ViewerPanel, SEGMENTATION_AVAILABLE
 from pylungviewer.gui.sidebar import SidebarPanel
 from pylungviewer.gui.dialogs.import_dialog import DicomImportDialog
@@ -28,13 +26,10 @@ logger = logging.getLogger(__name__)
 
 class MainWindow(QMainWindow):
     """Главное окно приложения PyLungViewer."""
-
-    # Добавляем models_dir в параметры конструктора
     def __init__(self, settings: QSettings, models_dir: str, parent=None):
         super().__init__(parent)
         self.settings = settings
-        self.models_dir = models_dir # Сохраняем путь к папке моделей
-        # Инициализируем DicomLoader здесь
+        self.models_dir = models_dir 
         self.dicom_loader = DicomLoader(settings)
         self.dicom_loader.loading_complete.connect(self._on_loading_complete)
         self.dicom_loader.loading_error.connect(self._on_loading_error)
@@ -44,17 +39,13 @@ class MainWindow(QMainWindow):
         logger.info("Главное окно инициализировано")
 
     def _init_ui(self):
-        self.setWindowTitle("PyLungViewer") # Исправлен заголовок
+        self.setWindowTitle("LungViewer") 
         self.setMinimumSize(1024, 768)
         self.central_widget = QSplitter(Qt.Horizontal)
         self.setCentralWidget(self.central_widget)
 
-        # --- Сначала создаем viewer_panel ---
-        # Передаем путь к папке моделей И экземпляр dicom_loader в ViewerPanel
         self.viewer_panel = ViewerPanel(models_dir=self.models_dir, dicom_loader=self.dicom_loader, parent=self)
-        # --- Потом создаем sidebar_panel, передавая viewer_panel ---
         self.sidebar_panel = SidebarPanel(viewer_panel=self.viewer_panel, parent=self)
-        # ----------------------------------------------------------
 
         self.sidebar_panel.series_selected.connect(self._on_series_selected)
         self.sidebar_panel.export_progress.connect(self._on_export_progress)
@@ -67,7 +58,6 @@ class MainWindow(QMainWindow):
         self.viewer_panel.model_loaded_status.connect(self._on_model_loaded_status)
 
         # Подключаем сигнал от ViewerPanel о необходимости обновления состояния действий измерения
-        # Сигнал теперь передает 3 параметра: (данные загружены, режим рисования активен, есть ли измерения)
         self.viewer_panel.measurement_state_changed.connect(self._update_measurement_actions_state)
 
 
@@ -93,24 +83,14 @@ class MainWindow(QMainWindow):
 
 
     def _create_actions(self):
-        # --- Файловые действия ---
         self.import_action = QAction("Импорт DICOM", self)
         self.import_action.setStatusTip("Импортировать DICOM файлы или директорию")
         self.import_action.triggered.connect(self._on_import_dicom)
-
-        # Удаляем действие "Загрузить модель", т.к. она будет загружаться автоматически
-        # self.load_model_action = QAction("Загрузить модель", self)
-        # self.load_model_action.setStatusTip("Загрузить файл .pth модели сегментации")
-        # self.load_model_action.triggered.connect(self._on_load_model)
-        # self.load_model_action.setEnabled(SEGMENTATION_AVAILABLE)
-        # if not SEGMENTATION_AVAILABLE:
-        #     self.load_model_action.setToolTip("Модуль сегментации или его зависимости не найдены")
 
         self.exit_action = QAction("Выход", self)
         self.exit_action.setShortcut("Ctrl+Q")
         self.exit_action.triggered.connect(self.close)
 
-        # --- Действия для работы с просмотром ---
         self.zoom_in_action = QAction("Уменьшить", self)
         self.zoom_in_action.setShortcut("Ctrl++")
         self.zoom_in_action.triggered.connect(self._on_zoom_in)
@@ -121,44 +101,36 @@ class MainWindow(QMainWindow):
         self.reset_view_action.setShortcut("Ctrl+0")
         self.reset_view_action.triggered.connect(self._on_reset_view)
 
-        # --- Действие для инструмента измерения (открывает подменю) ---
         self.measure_action = QAction("Измерение", self)
         self.measure_action.setStatusTip("Инструменты измерения расстояний")
-        # Это действие теперь не переключаемое и не запускает рисование напрямую
         self.measure_action.setCheckable(False)
-        self.measure_action.setEnabled(False) # Изначально выключено
-        # -------------------------------------------------------------
+        self.measure_action.setEnabled(False) 
 
-        # --- Новое действие для начала рисования измерения ---
         self.start_drawing_action = QAction("Начать измерение", self)
         self.start_drawing_action.setStatusTip("Начать рисование линии измерения")
         self.start_drawing_action.triggered.connect(self._on_start_drawing)
-        self.start_drawing_action.setEnabled(False) # Изначально выключено
-        # ----------------------------------------------------
+        self.start_drawing_action.setEnabled(False) 
 
-        # --- Действие для очистки всех измерений ---
         self.clear_all_measurements_action = QAction("Очистить все измерения", self)
         self.clear_all_measurements_action.setStatusTip("Удалить все измерения на текущем срезе")
         self.clear_all_measurements_action.triggered.connect(self._on_clear_all_measurements)
-        # Состояние этой кнопки будет зависеть от наличия измерений, управляется из ViewerPanel
+
         self.clear_all_measurements_action.setEnabled(False)
-        # ------------------------------------------
 
-
-        # --- Действия для инструментов сегментации ---
+        # Действия для инструментов сегментации
         self.segment_slice_action = QAction("Сегм. срез", self)
         self.segment_slice_action.setStatusTip("Выполнить сегментацию только для текущего среза")
         self.segment_slice_action.triggered.connect(self._on_segment_slice)
-        # Изначально выключены, будут включены после загрузки модели и данных
+
         self.segment_slice_action.setEnabled(False)
 
         self.segment_volume_action = QAction("Сегм. весь объем", self)
         self.segment_volume_action.setStatusTip("Выполнить сегментацию для всех срезов серии (может занять время)")
         self.segment_volume_action.triggered.connect(self._on_segment_volume)
-        # Изначально выключены, будут включены после загрузки модели и данных
+
         self.segment_volume_action.setEnabled(False)
 
-        # Подсказки, если сегментация недоступна
+
         if not SEGMENTATION_AVAILABLE:
              self.segment_slice_action.setToolTip("Модуль сегментации или его зависимости не найдены")
              self.segment_volume_action.setToolTip("Модуль сегментации или его зависимости не найдены")
@@ -167,8 +139,7 @@ class MainWindow(QMainWindow):
     def _create_menus(self):
         self.file_menu = self.menuBar().addMenu("Файл")
         self.file_menu.addAction(self.import_action)
-        # Удаляем действие "Загрузить модель", т.к. она будет загружаться автоматически
-        # self.file_menu.addAction(self.load_model_action)
+
         self.file_menu.addSeparator()
         self.file_menu.addAction(self.exit_action)
 
@@ -202,14 +173,13 @@ class MainWindow(QMainWindow):
         self.addToolBar(Qt.TopToolBarArea, self.main_toolbar)
 
         self.main_toolbar.addAction(self.import_action)
-        # Удаляем действие "Загрузить модель" из панели инструментов
-        # self.main_toolbar.addAction(self.load_model_action)
+
         self.main_toolbar.addSeparator()
         self.main_toolbar.addAction(self.zoom_in_action)
         self.main_toolbar.addAction(self.zoom_out_action)
         self.main_toolbar.addAction(self.reset_view_action)
         self.main_toolbar.addSeparator()
-        self.main_toolbar.addAction(self.measure_action) # Добавляем действие измерения (с подменю) на панель инструментов
+        self.main_toolbar.addAction(self.measure_action) 
         self.main_toolbar.addSeparator()
         self.main_toolbar.addAction(self.segment_slice_action)
         self.main_toolbar.addAction(self.segment_volume_action)
@@ -263,14 +233,6 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Ошибка импорта", f"Произошла ошибка: {str(e)}")
             self._update_status_bar("Ошибка при импорте DICOM")
             self.progress_bar.setVisible(False)
-            # Включаем действия измерения обратно после ошибки загрузки
-            # Состояние будет обновлено через сигнал от ViewerPanel при сбросе
-            # self._update_measurement_actions_state()
-
-
-    # Удаляем метод _on_load_model, т.к. загрузка модели теперь автоматическая
-    # def _on_load_model(self):
-    #     ...
 
 
     @pyqtSlot(bool)
@@ -280,20 +242,9 @@ class MainWindow(QMainWindow):
         Обновляет статус-бар и состояние кнопок сегментации.
         """
         if success:
-            # Здесь мы не знаем точное имя загруженной модели,
-            # но можем показать общий статус.
             self._update_status_bar("Модель сегментации загружена.")
         else:
             self._update_status_bar("Ошибка загрузки модели сегментации.")
-            # Если модель не загружена, кнопки сегментации должны быть выключены
-            # Это уже обрабатывается в _update_segmentation_actions_state
-            # после получения данных серии.
-
-        # Обновляем состояние кнопок после загрузки модели (или ее неудачи)
-        # Но делаем это только после загрузки данных серии,
-        # т.к. для сегментации нужны и модель, и данные.
-        # Поэтому _update_segmentation_actions_state вызывается после _on_series_selected
-        # и _on_loading_complete.
 
 
     @pyqtSlot(int, int)
@@ -313,11 +264,10 @@ class MainWindow(QMainWindow):
         self.progress_bar.setMaximum(100)
         self._update_status_bar(f"Загружено {len(studies)} исследований")
         self.sidebar_panel.set_studies(studies)
-        self.viewer_panel._show_placeholder() # _show_placeholder испускает measurement_state_changed
+        self.viewer_panel._show_placeholder() 
         # Обновляем состояние кнопок сегментации после загрузки данных
         self._update_segmentation_actions_state()
-        # Состояние действий измерения обновится по сигналу от ViewerPanel
-        # self._update_measurement_actions_state() # Удаляем прямой вызов
+
         logger.info(f"Загружено {len(studies)} исследований")
 
     @pyqtSlot(str)
@@ -325,19 +275,13 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         QMessageBox.critical(self, "Ошибка импорта", error_message)
         self._update_status_bar("Ошибка при импорте DICOM")
-        # Включаем действия измерения обратно после ошибки загрузки
-        # Состояние обновится по сигналу от ViewerPanel при сбросе
-        # self._update_measurement_actions_state() # Удаляем прямой вызов
 
 
     @pyqtSlot(object)
     def _on_series_selected(self, series_data):
         logger.info(f"Выбрана серия для отображения: {series_data.get('description', 'Неизвестно')}")
-        self.viewer_panel.load_series(series_data) # load_series испускает measurement_state_changed
-        # Обновляем состояние кнопок сегментации после выбора серии
+        self.viewer_panel.load_series(series_data) 
         self._update_segmentation_actions_state()
-        # Состояние действий измерения обновится по сигналу от ViewerPanel
-        # self._update_measurement_actions_state() # Удаляем прямой вызов
 
 
     def _update_segmentation_actions_state(self):
@@ -354,14 +298,7 @@ class MainWindow(QMainWindow):
         )
         self.segment_slice_action.setEnabled(can_segment)
         self.segment_volume_action.setEnabled(can_segment)
-        # Состояние чекбокса "Показать сегментацию" управляется внутри ViewerPanel
-        # self.viewer_panel.segment_checkbox.setEnabled(...)
 
-
-    # Удаляем слот _on_measure_action_toggle, т.к. measure_action больше не переключаемая
-    # @pyqtSlot(bool)
-    # def _on_measure_action_toggle(self, checked):
-    #     ...
 
     @pyqtSlot()
     def _on_start_drawing(self):
@@ -422,8 +359,7 @@ class MainWindow(QMainWindow):
             logger.debug("Reset View")
 
     def _on_segment_slice(self):
-        # Проверка доступности сегментации теперь делается в _check_segmentation_prerequisites
-        # внутри ViewerPanel, вызываемой из run_single_slice_segmentation
+
         if hasattr(self.viewer_panel, 'run_single_slice_segmentation'):
             self.viewer_panel.run_single_slice_segmentation()
         else:
@@ -431,8 +367,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Сегментация недоступна", "Функция сегментации недоступна.")
 
     def _on_segment_volume(self):
-        # Проверка доступности сегментации теперь делается в _check_segmentation_prerequisites
-        # внутри ViewerPanel, вызываемой из start_full_segmentation
+
         if hasattr(self.viewer_panel, 'start_full_segmentation'):
             self.viewer_panel.start_full_segmentation()
         else:
@@ -451,7 +386,6 @@ class MainWindow(QMainWindow):
             self.progress_bar.setMaximum(0)
             self.progress_bar.setValue(0)
 
-    # --- Слот для статуса экспорта ---
     @pyqtSlot(int, int)
     def _on_export_progress(self, current, total):
         """ Обновляет прогресс-бар в строке состояния при экспорте. """
@@ -464,16 +398,12 @@ class MainWindow(QMainWindow):
         else:
             self.progress_bar.setMaximum(0)
             self.progress_bar.setValue(0)
-    # ---------------------------------
 
     @pyqtSlot(str)
     def _update_status_bar(self, message):
         """ Обновляет текст в строке состояния и скрывает прогресс-бар, если нужно. """
         self.status_label.setText(message)
-        # Скрываем прогресс-бар через 2 секунды, если сообщение не указывает на текущий процесс
-        # и прогресс-бар видим.
         if "..." not in message and self.progress_bar.isVisible():
-             # Используем QTimer.singleShot для задержки скрытия
              QTimer.singleShot(2000, lambda: self._hide_progress_bar_if_idle())
         elif "..." in message and not self.progress_bar.isVisible():
              self.progress_bar.setVisible(True)
@@ -488,33 +418,23 @@ class MainWindow(QMainWindow):
     def _on_study_removed(self, study_id):
         """Обрабатывает сигнал удаления исследования из Sidebar."""
         logger.info(f"Получен сигнал об удалении исследования {study_id} из вида.")
-        # Можно добавить очистку кэша DicomLoader, если он хранит данные по ID
-        # Например: self.dicom_loader.clear_study_cache(study_id)
-        # Также, если удалено текущее исследование, нужно сбросить ViewerPanel
+
         if self.viewer_panel.current_series:
              current_study_id = None
-             # Ищем исследование текущей серии в sidebar_panel.studies (если нужно)
-             # Или можно передать study_id текущей серии из ViewerPanel
-             # Пока просто сбрасываем, если study_id совпадает (предполагая, что study_id уникален)
-             current_study_data = self.viewer_panel.current_series.get('study_data') # Если вы храните ссылку на исследование в серии
+             current_study_data = self.viewer_panel.current_series.get('study_data') 
              if current_study_data and current_study_data.get('id') == study_id:
                   logger.info("Удалено текущее исследование, сбрасываем ViewerPanel.")
-                  self.viewer_panel.load_series(None) # Сброс ViewerPanel
+                  self.viewer_panel.load_series(None) # Сброс 
                   self._update_segmentation_actions_state()
-                  # Состояние действий измерения обновится по сигналу от ViewerPanel
-                  # self._update_measurement_actions_state() # Удаляем прямой вызов
 
 
     def closeEvent(self, event):
-        # ... (остановка потоков остается такой же) ...
         if hasattr(self.viewer_panel, 'cancel_segmentation'):
             self.viewer_panel.cancel_segmentation()
-            # Добавим небольшую задержку, чтобы поток успел отреагировать на отмену
             QApplication.processEvents() # Обрабатываем события, чтобы сигнал отмены дошел
             if self.viewer_panel.segmentation_thread and self.viewer_panel.segmentation_thread.isRunning():
                 logger.info("Ожидание завершения потока сегментации перед выходом...")
-                # Увеличим время ожидания, если необходимо
-                if not self.viewer_panel.segmentation_thread.wait(5000): # Ждем до 5 секунд
+                if not self.viewer_panel.segmentation_thread.wait(5000): 
                      logger.warning("Поток сегментации не завершился вовремя.")
         if hasattr(self.sidebar_panel, 'export_worker') and self.sidebar_panel.export_worker is not None:
              if self.sidebar_panel.export_thread and self.sidebar_panel.export_thread.isRunning():
@@ -522,9 +442,8 @@ class MainWindow(QMainWindow):
                   # Отменяем воркер, если он есть
                   if hasattr(self.sidebar_panel.export_worker, 'cancel'):
                       self.sidebar_panel.export_worker.cancel()
-                  # Добавим небольшую задержку для обработки отмены
                   QApplication.processEvents()
-                  if not self.sidebar_panel.export_thread.wait(2000): # Ждем до 2 секунд
+                  if not self.sidebar_panel.export_thread.wait(2000):
                        logger.warning("Поток экспорта не завершился вовремя.")
 
         self._save_window_settings()

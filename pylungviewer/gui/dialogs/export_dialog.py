@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
 
 """
 Диалог настроек экспорта DICOM/PNG.
@@ -19,17 +17,9 @@ logger = logging.getLogger(__name__)
 
 class ExportDialog(QDialog):
     """Диалог настроек экспорта."""
-
     export_settings_confirmed = pyqtSignal(dict)
-
     def __init__(self, item_type, item_desc, parent=None):
-        """
-        Инициализация диалога.
-        Args:
-            item_type (str): 'study' или 'series'.
-            item_desc (str): Описание элемента для заголовка.
-            parent: Родительский виджет.
-        """
+
         super().__init__(parent)
         self.item_type = item_type
         self.settings = {}
@@ -61,14 +51,10 @@ class ExportDialog(QDialog):
         self.apply_window_checkbox.setEnabled(True)
         png_options_layout.addWidget(self.apply_window_checkbox)
 
-        # --- Добавлен чекбокс для маски ---
         self.include_mask_checkbox = QCheckBox("Включить маску сегментации (если доступна)")
         self.include_mask_checkbox.setToolTip("Наложить рассчитанную маску сегментации на изображение PNG.")
-        # Доступность этого чекбокса может зависеть от того, была ли выполнена сегментация
-        # Пока оставим активным, логика будет в экспортере
         self.include_mask_checkbox.setEnabled(True)
         png_options_layout.addWidget(self.include_mask_checkbox)
-        # ---------------------------------
 
         layout.addWidget(self.png_options_group)
         self.png_options_group.setVisible(False)
@@ -122,12 +108,10 @@ class ExportDialog(QDialog):
             self.settings['anonymize'] = self.anonymize_checkbox.isChecked()
             self.settings['apply_window'] = False
             self.settings['include_mask'] = False # Маска не применяется к DICOM
-        else: # png
+        else: 
             self.settings['anonymize'] = False
             self.settings['apply_window'] = self.apply_window_checkbox.isChecked()
-            # --- Считываем состояние чекбокса маски ---
             self.settings['include_mask'] = self.include_mask_checkbox.isChecked()
-            # -----------------------------------------
         logger.info(f"Настройки экспорта подтверждены: {self.settings}")
         self.export_settings_confirmed.emit(self.settings)
         self.accept()

@@ -17,10 +17,9 @@ logger = logging.getLogger(__name__)
 class DicomLoader(QObject):
     """Загрузчик DICOM файлов."""
     
-    # Сигналы
-    loading_progress = pyqtSignal(int, int)  # прогресс, всего
-    loading_complete = pyqtSignal(list)      # список загруженных исследований
-    loading_error = pyqtSignal(str)          # сообщение об ошибке
+    loading_progress = pyqtSignal(int, int) 
+    loading_complete = pyqtSignal(list)      
+    loading_error = pyqtSignal(str)          
     
     def __init__(self, settings=None, parent=None):
         """
@@ -33,10 +32,8 @@ class DicomLoader(QObject):
         super().__init__(parent)
         self.settings = settings or QSettings()
         
-        # Кэш для хранения загруженных исследований
         self._studies_cache = {}
         
-        # Список поддерживаемых расширений DICOM
         self.dicom_extensions = ['.dcm', '.dicom', '.dic', '']
         
         logger.info("Инициализирован загрузчик DICOM")
@@ -52,7 +49,6 @@ class DicomLoader(QObject):
         Returns:
             list: Список загруженных исследований.
         """
-        # Проверяем, есть ли среди путей DICOMDIR файлы
         dicomdir_files = []
         other_files = []
         
@@ -220,7 +216,7 @@ class DicomLoader(QObject):
                 'patient_id': getattr(ds, 'PatientID', 'unknown'),
                 'patient_name': str(getattr(ds, 'PatientName', '')),
                 'slice_location': getattr(ds, 'SliceLocation', 0),
-                'ds': ds  # Сохраняем ссылку на датасет для дальнейшего использования
+                'ds': ds  
             }
             
             return metadata
@@ -242,26 +238,21 @@ class DicomLoader(QObject):
             logger.info(f"Обработка DICOMDIR файла: {dicomdir_path}")
             dicomdir = pydicom.dcmread(dicomdir_path)
             
-            # Выводим структуру тегов DICOMDIR для анализа
             logger.info(f"DICOMDIR содержит следующие теги верхнего уровня: {[elem.name for elem in dicomdir]}")
             
-            # Ищем директорию, где находятся DICOM-файлы
             base_dir = os.path.dirname(dicomdir_path)
             logger.info(f"Базовая директория для DICOM файлов: {base_dir}")
             
-            # Ищем все DICOM файлы в директории и поддиректориях
             result = []
             dicom_files = []
             
-            # Рекурсивный поиск DICOM файлов
             for root, _, files in os.walk(base_dir):
                 for file in files:
                     if file.lower().endswith(('.dcm', '.ima', '.img')) or file == "DICOMDIR":
-                        continue  # Пропускаем DICOMDIR
+                        continue 
                     
                     file_path = os.path.join(root, file)
                     try:
-                        # Проверяем, является ли файл DICOM
                         if self._is_dicom_file(file_path):
                             dicom_files.append(file_path)
                     except Exception as e:
@@ -311,7 +302,6 @@ class DicomLoader(QObject):
         Returns:
             list: Список исследований с вложенными сериями.
         """
-        # Словарь для группировки по исследованиям
         studies_dict = defaultdict(lambda: {
             'id': '',
             'date': '',
@@ -322,12 +312,10 @@ class DicomLoader(QObject):
             'series': defaultdict(list)
         })
         
-        # Группируем файлы по исследованиям и сериям
         for item in dicom_data:
             study_uid = item['study_instance_uid']
             series_uid = item['series_instance_uid']
             
-            # Обновляем информацию об исследовании
             studies_dict[study_uid]['id'] = study_uid
             studies_dict[study_uid]['date'] = item['study_date']
             studies_dict[study_uid]['time'] = item['study_time']
@@ -335,7 +323,6 @@ class DicomLoader(QObject):
             studies_dict[study_uid]['patient_id'] = item['patient_id']
             studies_dict[study_uid]['patient_name'] = item['patient_name']
             
-            # Добавляем файл в соответствующую серию
             studies_dict[study_uid]['series'][series_uid].append(item)
         
         # Преобразуем словарь в список исследований
@@ -417,10 +404,8 @@ class DicomLoader(QObject):
             else:
                 ds = file_metadata['ds']
             
-            # Извлекаем пиксельные данные
             pixel_data = ds.pixel_array
             
-            # Применяем LUT трансформацию, если необходимо
             if hasattr(ds, 'RescaleSlope') and hasattr(ds, 'RescaleIntercept'):
                 pixel_data = pixel_data * ds.RescaleSlope + ds.RescaleIntercept
             

@@ -1,5 +1,3 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
 
 """
 Боковая панель с списком исследований для приложения PyLungViewer.
@@ -18,7 +16,6 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, pyqtSignal, pyqtSlot, QThread
 from PyQt5.QtGui import QIcon, QContextMenuEvent, QCursor
 
-# Импортируем с проверкой на существование файла диалога
 try:
     from .dialogs.export_dialog import ExportDialog
     EXPORT_DIALOG_AVAILABLE = True
@@ -28,7 +25,6 @@ except ImportError:
     try: logger = logging.getLogger(__name__)
     except NameError: import logging; logger = logging.getLogger(__name__)
     logger.warning("Файл диалога экспорта (export_dialog.py) не найден.")
-# Импортируем с проверкой на существование файла экспортера
 try:
     from ..core.dicom_exporter import ExportWorker
     EXPORTER_AVAILABLE = True
@@ -51,31 +47,21 @@ class SidebarPanel(QWidget):
     export_progress = pyqtSignal(int, int)
     export_status_update = pyqtSignal(str)
 
-    # --- Изменено: Добавлен параметр viewer_panel ---
     def __init__(self, viewer_panel, parent=None):
         """
         Инициализация боковой панели.
-
-        Args:
             viewer_panel: Ссылка на экземпляр ViewerPanel.
             parent: Родительский виджет.
         """
         super().__init__(parent)
-        self.viewer_panel = viewer_panel # Сохраняем ссылку
-        # -------------------------------------------
+        self.viewer_panel = viewer_panel 
         self.studies = []
         self.export_thread = None
         self.export_worker = None
         self._init_ui()
         logger.info("Боковая панель инициализирована")
 
-    # --- Удален метод _get_viewer_panel ---
-    # def _get_viewer_panel(self):
-    #     ...
-    # ------------------------------------
-
     def _init_ui(self):
-        # ... (UI initialization remains the same) ...
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(5, 5, 5, 5)
 
@@ -116,12 +102,10 @@ class SidebarPanel(QWidget):
 
 
     def set_studies(self, studies):
-        # ... (remains the same) ...
         self.studies = studies if studies else []
         self.update_study_list()
 
     def update_study_list(self):
-        # ... (remains the same) ...
         self.study_tree.clear()
         if not self.studies:
             logger.info("Нет данных для отображения")
@@ -150,7 +134,6 @@ class SidebarPanel(QWidget):
         logger.info(f"Отображено {len(self.studies)} исследований")
 
     def _on_search_changed(self, text):
-        # ... (remains the same) ...
         search_text = text.lower()
         for i in range(self.study_tree.topLevelItemCount()):
             study_item = self.study_tree.topLevelItem(i)
@@ -174,7 +157,6 @@ class SidebarPanel(QWidget):
 
 
     def _on_item_clicked(self, item, column):
-        # ... (remains the same) ...
         item_info = item.data(0, Qt.UserRole)
         if item_info is None: return
         if item_info['type'] == 'study':
@@ -183,7 +165,6 @@ class SidebarPanel(QWidget):
             self.series_selected.emit(item_info['data'])
 
     def _on_item_double_clicked(self, item, column):
-        # ... (remains the same) ...
         item_info = item.data(0, Qt.UserRole)
         if item_info is None: return
         if item_info['type'] == 'study':
@@ -193,7 +174,6 @@ class SidebarPanel(QWidget):
             self.series_selected.emit(item_info['data'])
 
     def _show_context_menu(self, position):
-        # ... (remains the same) ...
         item = self.study_tree.itemAt(position)
         if not item: return
         item_info = item.data(0, Qt.UserRole)
@@ -220,7 +200,6 @@ class SidebarPanel(QWidget):
             self._remove_item_from_view(item)
 
     def _show_export_dialog(self, item_info):
-        # ... (remains the same) ...
         if not EXPORT_DIALOG_AVAILABLE or ExportDialog is None:
             QMessageBox.warning(self, "Ошибка", "Диалог экспорта недоступен.")
             return
@@ -258,10 +237,8 @@ class SidebarPanel(QWidget):
             QMessageBox.warning(self, "Экспорт невозможен", "Не найдены файлы для экспорта.")
             return
 
-        # --- Изменено: Получаем маску из self.viewer_panel ---
         mask_volume = None
-        # viewer = self._get_viewer_panel() # Убрали этот метод
-        if self.viewer_panel and settings.get('include_mask'): # Используем self.viewer_panel
+        if self.viewer_panel and settings.get('include_mask'): 
              current_series_id = self.viewer_panel.current_series.get('id') if self.viewer_panel.current_series else None
              exporting_series_id = item_data.get('id') if item_type == 'series' else None
 
@@ -270,7 +247,6 @@ class SidebarPanel(QWidget):
              if item_type == 'study':
                   exporting_study_id = item_data.get('id')
              elif item_type == 'series':
-                  # Находим исследование, к которому относится серия
                   study_idx = item_info.get('study_index')
                   if study_idx is not None and study_idx < len(self.studies):
                       exporting_study_id = self.studies[study_idx].get('id')
@@ -278,7 +254,6 @@ class SidebarPanel(QWidget):
              # Определяем ID исследования текущей серии в просмотрщике
              current_study_id = None
              if self.viewer_panel.current_series:
-                  # Ищем исследование текущей серии в self.studies
                   for study in self.studies:
                        for series in study.get('series', []):
                             if series.get('id') == current_series_id:
@@ -286,8 +261,6 @@ class SidebarPanel(QWidget):
                                  break
                        if current_study_id: break
 
-             # Берем маску, если экспортируется то же исследование/серия, что и в просмотрщике
-             # и если маска там рассчитана
              ids_match = False
              if item_type == 'study' and exporting_study_id == current_study_id:
                   ids_match = True
@@ -300,7 +273,6 @@ class SidebarPanel(QWidget):
              elif settings.get('include_mask'): # Если маска запрошена, но условия не выполнены
                   logger.warning("Запрошен экспорт с маской, но она недоступна для данного элемента или не рассчитана.")
                   settings['include_mask'] = False # Сбрасываем флаг
-        # ----------------------------------------------------
 
         logger.info(f"Запуск экспорта {len(source_files)} файлов с настройками: {settings}")
         self.export_status_update.emit(f"Экспорт {item_type}...")
@@ -313,7 +285,6 @@ class SidebarPanel(QWidget):
         self.export_worker.error.connect(self._on_export_error)
         self.export_thread.started.connect(self.export_worker.run)
         self.export_thread.finished.connect(self.export_thread.deleteLater)
-        # self.export_thread.finished.connect(self._clear_export_thread_refs) # Убрали очистку по finished потока
         self.export_thread.start()
 
     @pyqtSlot()
@@ -324,7 +295,7 @@ class SidebarPanel(QWidget):
              self.export_status_update.emit("Экспорт завершен.")
         else:
              self.export_status_update.emit("Экспорт отменен или завершен с ошибкой.")
-        self._clear_export_thread_refs() # Очищаем здесь
+        self._clear_export_thread_refs()
 
     @pyqtSlot(str)
     def _on_export_error(self, error_message):
@@ -332,7 +303,7 @@ class SidebarPanel(QWidget):
         logger.error(f"Ошибка экспорта: {error_message}")
         QMessageBox.critical(self, "Ошибка экспорта", f"Произошла ошибка:\n{error_message}")
         self.export_status_update.emit("Ошибка экспорта.")
-        self._clear_export_thread_refs() # Очищаем здесь
+        self._clear_export_thread_refs() 
 
     def _clear_export_thread_refs(self):
         """ Очищает ссылки на поток и воркер экспорта. """
@@ -349,8 +320,6 @@ class SidebarPanel(QWidget):
             except TypeError: pass
             try: self.export_thread.finished.disconnect(self.export_thread.deleteLater)
             except TypeError: pass
-            # try: self.export_thread.finished.disconnect(self._clear_export_thread_refs) # Убрали рекурсивный вызов
-            # except TypeError: pass
             if self.export_thread.isRunning():
                 self.export_thread.quit()
                 self.export_thread.wait(500)
@@ -360,7 +329,6 @@ class SidebarPanel(QWidget):
 
 
     def _remove_item_from_view(self, item: QTreeWidgetItem):
-        # ... (remains the same) ...
         item_info = item.data(0, Qt.UserRole)
         if item_info is None or item_info['type'] != 'study':
             logger.warning("Попытка удалить не исследование.")
@@ -391,7 +359,6 @@ class SidebarPanel(QWidget):
 
 
     def _show_study_details(self):
-        # ... (remains the same) ...
         selected_items = self.study_tree.selectedItems()
         if not selected_items: return
         selected_item = selected_items[0]

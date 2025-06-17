@@ -1,6 +1,3 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-
 """
 Модуль для экспорта DICOM данных в различных форматах.
 (Версия с выборочным смешиванием для полупрозрачной маски на PNG)
@@ -11,27 +8,22 @@ import os
 import shutil
 import pydicom
 import numpy as np
-import cv2 # Для сохранения PNG и наложения
+import cv2 
 from PyQt5.QtCore import QObject, pyqtSignal, QThread
-from PyQt5.QtGui import QColor # Для цвета маски
-
-# Импортируем для доступа к загрузчику пикселей и пресетам окна
+from PyQt5.QtGui import QColor
 from .dicom_loader import DicomLoader
 from ..utils.window_presets import WindowPresets
 
 logger = logging.getLogger(__name__)
 
-# --- Константа для прозрачности маски при экспорте PNG ---
-MASK_ALPHA_FOR_PNG = 80 / 255.0 # Настрой прозрачность здесь (0.0 - 1.0)
-# --- Константа для цвета маски (BGR) ---
-MASK_COLOR_BGR = (0, 0, 255) # Красный
-# ---------------------------------------
+MASK_ALPHA_FOR_PNG = 80 / 255.0 
+MASK_COLOR_BGR = (0, 0, 255)
 
 class ExportWorker(QObject):
     """Воркер для выполнения экспорта в фоновом потоке."""
     finished = pyqtSignal()
     error = pyqtSignal(str)
-    progress = pyqtSignal(int, int) # current_file, total_files
+    progress = pyqtSignal(int, int) 
 
     def __init__(self, files_to_export, settings, mask_volume=None):
         super().__init__()
@@ -113,7 +105,6 @@ class ExportWorker(QObject):
             self.finished.emit()
 
     def _export_dicom_file(self, src_path, dest_path, anonymize):
-        # ... (остается без изменений) ...
         if not anonymize:
             shutil.copy2(src_path, dest_path)
         else:
@@ -143,7 +134,6 @@ class ExportWorker(QObject):
             if pixel_data_hu is None:
                 raise ValueError("Не удалось загрузить пиксельные данные.")
 
-            # 1. Получаем изображение в градациях серого (uint8)
             if apply_window:
                 window_center, window_width = WindowPresets.get_preset("Легочное")
                 img_gray = WindowPresets.apply_window(pixel_data_hu, window_center, window_width)
@@ -155,32 +145,24 @@ class ExportWorker(QObject):
                 else:
                      img_gray = np.zeros_like(pixel_data_hu, dtype=np.uint8)
 
-            # 2. Готовим изображение для сохранения
             if mask_slice is not None:
                 logger.info(f"Накладываем маску на PNG: {os.path.basename(dest_path_png)}")
                 if img_gray.shape != mask_slice.shape:
                     logger.warning(f"Размер маски {mask_slice.shape} не совпадает с изображением {img_gray.shape}. Маска не будет наложена.")
                     img_to_save = img_gray
                 else:
-                    # --- ИЗМЕНЕНО: Выборочное смешивание ---
-                    # Преобразуем серое в BGR
                     img_bgr = cv2.cvtColor(img_gray, cv2.COLOR_GRAY2BGR)
-                    # Создаем цветной слой для маски (полностью красный)
                     mask_color_layer = np.zeros_like(img_bgr, dtype=np.uint8)
-                    mask_color_layer[:] = MASK_COLOR_BGR # Заполняем все нужным цветом
+                    mask_color_layer[:] = MASK_COLOR_BGR
 
-                    # Смешиваем цветной слой маски с исходным BGR изображением
                     alpha = MASK_ALPHA_FOR_PNG
                     beta = 1.0 - alpha
                     blended_overlay = cv2.addWeighted(img_bgr, beta, mask_color_layer, alpha, 0.0)
 
-                    # Копируем результат смешивания ТОЛЬКО в те пиксели, где маска активна
                     mask_bool = mask_slice > 0
-                    img_to_save = img_bgr.copy() # Начинаем с исходного цветного изображения
+                    img_to_save = img_bgr.copy() 
                     img_to_save[mask_bool] = blended_overlay[mask_bool]
-                    # --------------------------------------
             else:
-                # Если маска не нужна, сохраняем исходное серое изображение
                 img_to_save = img_gray
                 logger.debug(f"Сохраняем PNG без маски: {os.path.basename(dest_path_png)}")
 
